@@ -1,9 +1,8 @@
 #pragma once
 // The command list: every action in the DAW is one named command, and keys,
-// speech, control surfaces, scripts and Faith all run the same commands.
+// speech, control surfaces, scripts and an AI assistant all run the same commands.
 //
-// Design rules, from how other DAWs and blind-made tools do it (research notes
-// in iCloud, Ear First DAW):
+// Design rules, from how other DAWs and blind-made tools do it:
 //  - A command has a stable string id ("transport.play"), never a number or
 //    its display name, so keymaps and scripts never break when names change.
 //  - Commands take typed arguments (nudge by how much), so one command does

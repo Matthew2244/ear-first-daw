@@ -81,7 +81,7 @@ struct ScreenReaderOutput : SpeechOutput
     bool announce = true;
 
     // VoiceOver drops an announcement posted while focus or a selection is
-    // moving (checked with VoiceOver on the Studio, 6 November 2026). So when
+    // moving (checked with VoiceOver, November 2026). So when
     // the screen has just changed, the announcement waits until it settles.
     double settleSeconds = 0.5;
     void screenChanged()    { lastScreenChange = juce::Time::getMillisecondCounterHiRes() / 1000.0; }

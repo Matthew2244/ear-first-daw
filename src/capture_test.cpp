@@ -8,7 +8,15 @@
 
 #include <JuceHeader.h>
 #include <tracktion_engine/testing/tracktion_EnginePlayer.h>
-#include <sys/resource.h>
+#if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+ #include <psapi.h>
+#else
+ #include <sys/resource.h>
+#endif
 #include <iostream>
 
 using namespace tracktion;
@@ -27,9 +35,19 @@ void check (bool ok, const juce::String& what)
 
 double peakMemoryMB()
 {
+   #if JUCE_WINDOWS
+    PROCESS_MEMORY_COUNTERS pmc {};
+    GetProcessMemoryInfo (GetCurrentProcess(), &pmc, sizeof (pmc));
+    return (double) pmc.PeakWorkingSetSize / (1024.0 * 1024.0);
+   #else
     rusage ru {};
     getrusage (RUSAGE_SELF, &ru);
+   #if JUCE_MAC
     return (double) ru.ru_maxrss / (1024.0 * 1024.0);   // bytes on macOS
+   #else
+    return (double) ru.ru_maxrss / 1024.0;              // kilobytes on Linux
+   #endif
+   #endif
 }
 
 struct QuietEngineBehaviour : public EngineBehaviour

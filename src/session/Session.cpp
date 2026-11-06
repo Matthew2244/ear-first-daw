@@ -1,7 +1,14 @@
 #include "session/Session.h"
 #include "capture/CaptureRecorder.h"
-#include <signal.h>
-#include <unistd.h>
+#if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #include <windows.h>
+#else
+ #include <signal.h>
+ #include <unistd.h>
+#endif
 
 namespace earfirst
 {
@@ -26,7 +33,26 @@ juce::String agoText (juce::RelativeTime t)    { return lengthText (t.inSeconds(
 
 bool processIsAlive (int pid)
 {
-    return pid > 0 && (::kill (pid, 0) == 0 || errno == EPERM);
+    if (pid <= 0) return false;
+   #if JUCE_WINDOWS
+    auto h = OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD) pid);
+    if (h == nullptr) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess (h, &code) && code == STILL_ACTIVE;
+    CloseHandle (h);
+    return alive;
+   #else
+    return ::kill (pid, 0) == 0 || errno == EPERM;
+   #endif
+}
+
+int thisProcessId()
+{
+   #if JUCE_WINDOWS
+    return (int) GetCurrentProcessId();
+   #else
+    return (int) ::getpid();
+   #endif
 }
 } // namespace
 
@@ -73,7 +99,7 @@ std::unique_ptr<Session> Session::open (Engine& engine, const juce::File& folder
     {
         auto lines = juce::StringArray::fromLines (s->markerFile().loadFileAsString());
         const int pid = lines[0].getIntValue();
-        if (pid != (int) ::getpid() && processIsAlive (pid) && lines[1] == juce::SystemStats::getComputerName())
+        if (pid != thisProcessId() && processIsAlive (pid) && lines[1] == juce::SystemStats::getComputerName())
         {
             error = "This song is already open in another copy of the app.";
             return {};
@@ -151,7 +177,7 @@ Session::~Session()
 
 void Session::writeMarker()
 {
-    markerFile().replaceWithText (juce::String ((int) ::getpid()) + "\n" + juce::SystemStats::getComputerName() + "\n");
+    markerFile().replaceWithText (juce::String (thisProcessId()) + "\n" + juce::SystemStats::getComputerName() + "\n");
 }
 
 void Session::simulateCrashMarker (const juce::File& f)

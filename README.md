@@ -1,61 +1,50 @@
-# Ear First DAW
+# Ear First
 
-The ear-first DAW Matthew and Faith are building. Right now this is one test program.
+A DAW built to be used by ear first, for blind and sighted musicians alike. It's early: the foundation is in place and being tested, and it isn't ready for real sessions yet.
 
-## capture-test
+The idea: every input you have is recorded all the time, whether the song is playing or not. When you play something you like, press K and it becomes a take, lined up on the timeline where you played it. Everything the app does is a named command you can reach from a key, a menu, a search, or a control surface, and the app tells you what happened in a short sentence through your screen reader.
 
-Checks Tracktion Engine's always-on capture (retrospective record): every input is kept, playing or stopped, and one command turns the last stretch into takes.
+## What works now
 
-Build:
+- **Always-on capture.** Every input goes to disk for the whole session, with no time limit but the disk. Tested at real speed from 1 to 1,024 inputs with nothing dropped, and for an hour on a 64-input interface. Takes come back sample-exact, as 24-bit broadcast WAVs stamped with their position. It survives a crash: audio captured but never kept is found on the next launch.
+- **Takes on the timeline.** A kept take lands on one track per input, where you played it, matched to the sample against the engine's own recording. That holds when you start playing before the song does and when the song loops: every pass is kept and the latest full one goes on the tracks.
+- **One list of commands.** Each action has a stable name, takes settings (nudge by how much), and speaks its result. Toggles say their new state. A command that can't run says why. Macros speak once and undo as one step.
+- **Keys.** One keymap for Mac and Windows, written once (Primary is Command on the Mac and Control on Windows). Keys can work in one place, such as the track list, and fall through to the main window. Your own keys are stored apart from the defaults, so an update never moves them, and a moved default is announced once. Keys VoiceOver, NVDA, JAWS or the system already use are flagged.
+- **Speech.** Urgent messages cut in. The rest wait for a gap in the music, and never longer than a few seconds. Repeated updates on the same thing replace each other. You can step back through everything that's been said.
+- **Songs.** A song is a folder. Saving can't leave a half-written file, songs autosave, and after a crash the next open says what it found and recovered.
+- **The app.** A window whose menus come from the command list, key help (Command-slash: press a key to hear what it does), Find a command (Command-Shift-P), and announcements through VoiceOver on the Mac.
 
+## Not done yet
+
+Windows has not been tested with NVDA or JAWS. Choosing your audio interface, playing back and editing takes, mixing, plugins and MIDI are still to come.
+
+## Building
+
+You need CMake, Ninja and a C++20 compiler (Xcode on the Mac, Visual Studio on Windows).
+
+    git clone --recursive https://github.com/Matthew2244/ear-first-daw.git
+    cd ear-first-daw
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-    cmake --build build --target capture-test
+    cmake --build build
 
-Run:
+On the Mac, sign the app with your own Developer ID so macOS remembers the microphone permission between builds:
 
-    build/capture-test_artefacts/Release/capture-test selftest
-    build/capture-test_artefacts/Release/capture-test live
+    cmake -S . -B build -DEARFIRST_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 
-`selftest` uses no microphone. It feeds a known click into the engine through Tracktion's hosted audio device and checks every take. `live` opens the real interface (macOS will ask for microphone access the first time) and takes typed commands: keep, status, quit. Takes go to `~/Music/Ear First Capture Test`.
+## Tests
 
-Tracktion Engine is a git submodule in `external/tracktion_engine`, pinned at commit a5e4499 (24 October 2026), GPLv3 or commercial licence.
+Every part has a test program that prints one plain sentence per line, so it reads well with a screen reader. None of them uses a microphone.
 
-## capture-recorder-test
+- `ear-first-selftest`: the app's own window code, menus, keys, key help and Find a command, driven without showing anything.
+- `capture-recorder-test`: the disk recorder. `capture-recorder-test scale` runs 128 to 1,024 inputs at real speed.
+- `capture-engine-test [block size]`: takes landing on the timeline, including loops, checked against the engine's own recording.
+- `commands-test`, `speech-test`, `session-test`: the command list and keymap, the speaking layer, and saving and crash recovery.
+- `capture-live "<device name>"`: the recorder on a real interface. Type keep, status or quit.
 
-The disk-backed recorder in `src/capture/`: every input to disk for the whole
-session, crash-safe raw segments, sample-exact keeps as stamped broadcast WAVs.
-Run `build/capture-recorder-test_artefacts/Release/capture-recorder-test`; it
-needs no microphone and cleans up after itself.
+## Built with
 
-## capture-engine-test
+[Tracktion Engine](https://github.com/Tracktion/tracktion_engine) and [JUCE](https://juce.com).
 
-The capture recorder inside the Tracktion engine. `EngineCapture` wraps the
-engine's audio callback: each block it reads every input untouched, then hands
-the same buffers to the engine, so the two can never overwrite each other.
-`TimelineMap` notes where the song was for each block (only storing changes),
-and keep puts each input on its own track, lined up with where it was played.
-The yardstick is the engine's own normal recording of the same click.
+## Licence
 
-    build/capture-engine-test_artefacts/Release/capture-engine-test [block size]
-
-Covers: song playing from the start and from 30 seconds, playing before the
-song starts, song never played (goes to the playhead), 64 inputs, and
-looping (every pass kept, the latest full pass on the tracks, the rest kept
-for comping, wraps noted to the sample even mid-block). Passes at block sizes
-64, 256, 1000, 1024 and 4096. Not yet covered: a real interface's latency.
-
-## commands-test
-
-The command list (`src/commands/Commands.*`) and keymap (`src/commands/Keymap.*`).
-Every action is one command with a stable id (`transport.play`), typed
-settings, and its own spoken result; toggles say their new state, a command
-that can't run says why, macros speak once and undo as one step, and repeat
-reruns the last change with its settings. Keys are written once for both
-systems (`Primary+Shift+K` = Command on the Mac, Control on Windows), work in
-scopes that fall through to global, can be two-key sequences, and are stored
-as your changes over versioned defaults, so a new version never moves your
-keys and a moved default is announced once. Keys VoiceOver, NVDA, JAWS or the
-system already use are flagged. Research behind the design is in iCloud, Ear
-First DAW.
-
-    build/commands-test_artefacts/Release/commands-test
+Ear First is free software under the GNU Affero General Public License, version 3. See [LICENSE](LICENSE). Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
