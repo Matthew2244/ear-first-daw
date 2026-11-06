@@ -33,6 +33,12 @@ public:
         juce::Array<tracktion::WaveAudioClip*> clips;
         tracktion::TimePosition timelineStart;
         bool linedUpWithSong = false;   // false: the song wasn't playing, so it went at the playhead
+
+        // When the song was looping, every pass around the loop. All of them
+        // are in the take's files; `chosenPass` is the one on the tracks.
+        struct Pass { tracktion::TimePosition start; tracktion::TimeDuration length, offsetInFile; };
+        std::vector<Pass> passes;
+        int chosenPass = -1;
         juce::String sentence;
     };
 
@@ -65,6 +71,7 @@ private:
     std::atomic<int64_t> blockStart { 0 };   // capture sample where the current block begins
     int takeNumber = 0;
     int maxBlock = 4096;
+    int deviceBlock = 512;
     std::vector<const float*> chunk;   // sized before audio starts
 };
 

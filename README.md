@@ -39,6 +39,7 @@ The yardstick is the engine's own normal recording of the same click.
     build/capture-engine-test_artefacts/Release/capture-engine-test [block size]
 
 Covers: song playing from the start and from 30 seconds, playing before the
-song starts, song never played (goes to the playhead), and 64 inputs. Passes
-at block sizes 64, 256, 1024 and 4096. Not yet covered: loops, and a real
-interface's latency.
+song starts, song never played (goes to the playhead), 64 inputs, and
+looping (every pass kept, the latest full pass on the tracks, the rest kept
+for comping, wraps noted to the sample even mid-block). Passes at block sizes
+64, 256, 1000, 1024 and 4096. Not yet covered: a real interface's latency.

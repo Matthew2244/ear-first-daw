@@ -84,6 +84,7 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     o.folder = captureFolder.getChildFile (juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"));
     o.sampleRate = rate;
     o.inputNames = inputNames;
+    deviceBlock = device->getCurrentBufferSizeSamples();
     o.maxBlockSize = maxBlock = std::max (4096, device->getCurrentBufferSizeSamples());
     chunk.assign ((size_t) numInputs, nullptr);
     recorder = std::make_unique<CaptureRecorder> (o);
@@ -130,6 +131,18 @@ void EngineCapture::noteTimeline (int n) noexcept
             editSample = toSamples (ctx->globalStreamTimeToEditTime (engine.getDeviceManager().getCurrentStreamTime()), sampleRate);
     }
     map.note (pos, playing, editSample);
+
+    // A loop can wrap in the middle of a block. Note the exact sample where
+    // it does, so every pass lines up to the sample, whatever the block size.
+    if (playing)
+        if (auto* ctx = context.load (std::memory_order_acquire))
+            if (auto* ph = ctx->getNodePlayHead(); ph != nullptr && ph->isLooping() && ! ph->isRollingIntoLoop())
+            {
+                const auto loop = ph->getLoopRange();
+                if (! loop.isEmpty() && editSample < loop.getEnd() && editSample + n > loop.getEnd())
+                    map.note (pos + (loop.getEnd() - editSample), true, loop.getStart());
+            }
+
     blockStart.store (pos + n, std::memory_order_relaxed);
 }
 
@@ -168,45 +181,92 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     k.take = recorder->keepLast (seconds, all, takesFolder, name);
     if (! k.take.ok()) { k.sentence = k.take.error; return k; }
 
-    // Where it goes. Line it up with the song if the song was playing,
-    // allowing for the interface's latency the same way normal recording does.
-    auto start = map.timelineStartFor (k.take.start, k.take.end);
-    if (start.has_value())
+    const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
+    edit->ensureNumberOfAudioTracks (numInputs);
+    auto tracks = getAudioTracks (*edit);
+    for (int i = 0; i < numInputs && i < tracks.size(); ++i)
+        if (tracks[i]->getName().startsWith ("Track ") || tracks[i]->getName().isEmpty())
+            tracks[i]->setName (inputNames[i]);
+
+    auto placeOnTracks = [&] (TimePosition at, TimeDuration length, TimeDuration offset)
     {
-        const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
-        k.timelineStart = TimePosition::fromSamples (*start - latency, sampleRate);
+        // A take that starts before the song's beginning is trimmed to start at zero.
+        if (at < TimePosition())
+        {
+            offset = offset + TimeDuration::fromSeconds (-at.inSeconds());
+            length = length - TimeDuration::fromSeconds (-at.inSeconds());
+            at = TimePosition();
+        }
+        if (length <= TimeDuration()) return;
+        for (int i = 0; i < k.take.files.size() && i < tracks.size(); ++i)
+            if (auto clip = tracks[i]->insertWaveClip (inputNames[i] + " " + name, k.take.files[i],
+                                                       ClipPosition { { at, length }, offset }, false))
+                k.clips.add (clip.get());
+        k.timelineStart = at;
+    };
+
+    // Was the song looping? Passes are steady playing stretches (the single
+    // block right after pressing play is a transition, not a pass), and a
+    // loop is a pass that goes back over the timeline the one before covered.
+    std::vector<TimelineMap::Stretch> passes;
+    for (auto& st : map.stretches (k.take.start, k.take.end))
+        if (st.playing && st.length() > deviceBlock)
+            passes.push_back (st);
+    bool looped = false;
+    for (size_t i = 1; i < passes.size(); ++i)
+        if (passes[i].editStart < passes[i - 1].editStart + passes[i - 1].length() - deviceBlock)
+            looped = true;
+
+    if (looped)
+    {
+        // Every pass is kept. The fullest one goes on the tracks, the latest
+        // if several are equally full; the rest wait in the take for comping.
+        size_t best = 0;
+        for (size_t i = 0; i < passes.size(); ++i)
+        {
+            const auto& p = passes[i];
+            k.passes.push_back ({ TimePosition::fromSamples (p.editStart - latency, sampleRate),
+                                  TimeDuration::fromSamples (p.length(), sampleRate),
+                                  TimeDuration::fromSamples (p.captureStart - k.take.start, sampleRate) });
+            if (p.length() >= passes[best].length() - deviceBlock)
+                best = i;
+        }
+        k.chosenPass = (int) best;
         k.linedUpWithSong = true;
+        auto& chosen = k.passes[best];
+        placeOnTracks (chosen.start, chosen.length, chosen.offsetInFile);
     }
     else
     {
-        k.timelineStart = edit->getTransport().getPosition();
-    }
-
-    const auto length = TimeDuration::fromSamples (k.take.end - k.take.start, sampleRate);
-    // A take that starts before the song's beginning is trimmed to start at zero.
-    TimeDuration offset;
-    if (k.timelineStart < TimePosition())
-    {
-        offset = TimeDuration::fromSeconds (-k.timelineStart.inSeconds());
-        k.timelineStart = TimePosition();
-    }
-
-    edit->ensureNumberOfAudioTracks (numInputs);
-    auto tracks = getAudioTracks (*edit);
-    for (int i = 0; i < k.take.files.size() && i < tracks.size(); ++i)
-    {
-        auto* t = tracks[i];
-        if (t->getName().startsWith ("Track ") || t->getName().isEmpty())
-            t->setName (inputNames[i]);
-        if (offset >= length) continue;
-        ClipPosition pos { { k.timelineStart, length - offset }, offset };
-        if (auto clip = t->insertWaveClip (inputNames[i] + " " + name, k.take.files[i], pos, false))
-            k.clips.add (clip.get());
+        // Line it up with the song if the song was playing, allowing for the
+        // interface's latency the same way normal recording does.
+        TimePosition at;
+        if (auto start = map.timelineStartFor (k.take.start, k.take.end))
+        {
+            at = TimePosition::fromSamples (*start - latency, sampleRate);
+            k.linedUpWithSong = true;
+        }
+        else
+        {
+            at = edit->getTransport().getPosition();
+        }
+        placeOnTracks (at, TimeDuration::fromSamples (k.take.end - k.take.start, sampleRate), {});
     }
 
     auto took = (double) (k.take.end - k.take.start) / sampleRate;
-    k.sentence = "Kept " + secondsText (took) + " on " + juce::String (k.clips.size())
-                 + (k.clips.size() == 1 ? " input" : " inputs") + ", "
+    if (looped)
+    {
+        const int others = (int) k.passes.size() - 1;
+        k.sentence = "Kept " + juce::String ((int) k.passes.size()) + " passes of the loop on "
+                     + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs")
+                     + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + whereText (*edit, k.timelineStart)
+                     + (others == 1 ? ". The other pass is saved" : ". The other " + juce::String (others) + " are saved")
+                     + " with the take for comping.";
+        if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;
+        return k;
+    }
+    k.sentence = "Kept " + secondsText (took) + " on " + juce::String (k.take.files.size())
+                 + (k.take.files.size() == 1 ? " input" : " inputs") + ", "
                  + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
                  + whereText (*edit, k.timelineStart) + ".";
     if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;

@@ -84,6 +84,33 @@ public:
         return best;
     }
 
+    // The take [start, end) cut into stretches where the song was steadily
+    // playing (or stopped). A loop shows up as playing stretches that go back
+    // over the same part of the timeline.
+    struct Stretch
+    {
+        int64_t captureStart = 0, captureEnd = 0;
+        int64_t editStart = 0;          // playing only
+        bool playing = false;
+        int64_t length() const          { return captureEnd - captureStart; }
+    };
+
+    std::vector<Stretch> stretches (int64_t start, int64_t end)
+    {
+        std::lock_guard<std::mutex> lock (readMutex);
+        collect();
+        std::vector<Stretch> out;
+        for (size_t i = 0; i < anchors.size(); ++i)
+        {
+            const auto& a = anchors[i];
+            const auto s0 = std::max (start, a.captureSample);
+            const auto s1 = std::min (end, i + 1 < anchors.size() ? anchors[i + 1].captureSample : end);
+            if (s1 <= s0) continue;
+            out.push_back ({ s0, s1, a.playing ? a.editSample + (s0 - a.captureSample) : 0, a.playing });
+        }
+        return out;
+    }
+
     bool hasOverflowed() const      { return overflowed.load(); }
 
     std::vector<Anchor> getAnchors()

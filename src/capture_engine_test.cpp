@@ -303,6 +303,45 @@ int main (int argc, char** argv)
         check (rig.capture->getRecorder() != nullptr && rig.capture->getRecorder()->getDroppedSamples() == 0, "Test 5: nothing dropped.");
     }
 
+    // 6. Looping: loop 4 to 8 seconds, play from 4, keep 10 seconds = two full
+    //    passes and half of a third. Click 6.5 seconds in, in pass 2, which is
+    //    timeline 6.5. Pass 2 (the latest full one) should go on the tracks.
+    {
+        say ("");
+        say ("Test 6: 8 inputs, song looping 4 to 8 seconds. Click in the second pass, at 6.5 on the timeline.");
+        Rig rig (engine, 8, false);
+        auto& tc = rig.edit->getTransport();
+        tc.setLoopRange ({ TimePosition::fromSeconds (4.0), TimePosition::fromSeconds (8.0) });
+        tc.looping = true;
+        tc.setPosition (TimePosition::fromSeconds (4.0));
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.5);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        tc.stop (false, true);
+        checkPlacement (engine, k, 8, 6.5 + lag, "Test 6", true);
+        check (k.passes.size() == 3, "Test 6: " + juce::String ((int) k.passes.size()) + " passes found, expected 3.");
+        check (k.chosenPass == 1, "Test 6: pass " + juce::String (k.chosenPass + 1) + " is on the tracks, expected pass 2.");
+        bool starts = k.passes.size() == 3;
+        double worst = 0;
+        for (auto& p : k.passes)
+            worst = std::max (worst, std::abs (p.start.inSeconds() - 4.0) * sr);
+        check (starts && worst <= block, "Test 6: every pass starts at the loop start, within " + juce::String (worst, 0)
+               + " samples (the first pass skips the block right after play).");
+        bool offsets = starts && std::abs (k.passes[1].offsetInFile.inSeconds() - 4.0) * sr < 0.5
+                              && std::abs (k.passes[2].offsetInFile.inSeconds() - 8.0) * sr < 0.5;
+        check (offsets, "Test 6: passes 2 and 3 begin exactly 4 and 8 seconds into the take.");
+        if (std::getenv ("EARFIRST_DEBUG"))
+        {
+            for (auto& p : k.passes)
+                say ("  pass: timeline " + juce::String (p.start.inSeconds() * sr, 0) + ", length " + juce::String (p.length.inSeconds() * sr, 0)
+                     + ", file offset " + juce::String (p.offsetInFile.inSeconds() * sr, 0));
+            for (auto& an : rig.capture->getTimelineMap().getAnchors())
+                say ("  anchor: capture " + juce::String (an.captureSample) + ", timeline " + juce::String (an.editSample)
+                     + (an.playing ? ", playing" : ", stopped"));
+        }
+    }
+
     say ("");
     say (failures == 0 ? "All checks passed." : juce::String (failures) + " checks failed.");
     return failures == 0 ? 0 : 1;
