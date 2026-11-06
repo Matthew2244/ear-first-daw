@@ -91,7 +91,8 @@ private:
     std::unique_ptr<EngineCapture> capture;
     std::unique_ptr<Updater> updates;
     Session::OpenReport lastOpenReport;
-    double lastAutosave = 0;
+    double lastAutosave = 0, lastUpdateCheck = 0;
+    juce::String announcedVersion;
     juce::String setAsideNote;   // said after a device switch kept the old capture
     bool wasPlaying = false;
 };

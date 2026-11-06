@@ -12,11 +12,12 @@ The idea: every input you have is recorded all the time, whether the song is pla
 - **Keys.** One keymap for Mac and Windows, written once (Primary is Command on the Mac and Control on Windows). Keys can work in one place, such as the track list, and fall through to the main window. Your own keys are stored apart from the defaults, so an update never moves them, and a moved default is announced once. Keys VoiceOver, NVDA, JAWS or the system already use are flagged.
 - **Speech.** Urgent messages cut in. The rest wait for a gap in the music, and never longer than a few seconds. Repeated updates on the same thing replace each other. You can step back through everything that's been said.
 - **Songs.** A song is a folder. Saving can't leave a half-written file, songs autosave, and after a crash the next open says what it found and recovered.
-- **The app.** A window whose menus come from the command list, key help (Command-slash: press a key to hear what it does), Find a command (Command-Shift-P), and announcements through VoiceOver on the Mac.
+- **The app.** A window whose menus come from the command list, key help (Command-slash: press a key to hear what it does), Find a command (Command-Shift-P), and announcements through VoiceOver on the Mac. Choose the interface you record from and play through, with the sample rate and buffer. Any command with settings gets a form. The window shows the song, the transport and capture at a glance, with bigger and smaller text.
+- **Updates.** On the Mac, Sparkle looks quietly every few hours and, when a new version is out, the app says so once, in one sentence. Check for Updates opens Sparkle's own window. An update never restarts the app while you're recording or have unsaved work.
 
 ## Not done yet
 
-Windows has not been tested with NVDA or JAWS. Choosing your audio interface, playing back and editing takes, mixing, plugins and MIDI are still to come.
+Windows builds in CI but hasn't been tried with NVDA or JAWS, and Windows updates (WinSparkle) come with the first Windows installer. Playing back and editing takes, mixing, plugins and MIDI are still to come.
 
 ## Building
 

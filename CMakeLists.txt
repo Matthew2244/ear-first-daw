@@ -146,6 +146,13 @@ juce_add_gui_app(EarFirst
     COMPANY_NAME "Matthew Whitaker"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "Ear First keeps everything you play on every input, so you can keep a take after you've played it."
+    PLIST_TO_MERGE [[
+<plist><dict>
+  <key>SUFeedURL</key><string>https://github.com/Matthew2244/ear-first-daw/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>TJlHNK3idLU77+cj97Pwh4xeuvFhhIVm32CLFwN5Dz0=</string>
+  <key>SUEnableAutomaticChecks</key><false/>
+  <key>SUAutomaticallyUpdate</key><false/>
+</dict></plist>]]
     NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(EarFirst)
 target_compile_features(EarFirst PRIVATE cxx_std_20)
@@ -167,6 +174,26 @@ if (APPLE)
     target_compile_options(ear-first-selftest PRIVATE "-fno-aligned-allocation")
 endif()
 
+# Sparkle (Mac updates): pinned download, checked against its SHA-256.
+# Updates come from the latest GitHub release's appcast.xml, signed with the
+# same EdDSA key as the maintainer's other apps.
+if (APPLE)
+    set(SPARKLE_VERSION 2.10.1)
+    set(SPARKLE_SHA256 1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27)
+    set(SPARKLE_DIR "${CMAKE_BINARY_DIR}/_deps/sparkle-${SPARKLE_VERSION}")
+    if (NOT EXISTS "${SPARKLE_DIR}/Sparkle.framework")
+        file(DOWNLOAD "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+             "${CMAKE_BINARY_DIR}/_deps/Sparkle-${SPARKLE_VERSION}.tar.xz"
+             EXPECTED_HASH SHA256=${SPARKLE_SHA256} SHOW_PROGRESS)
+        file(ARCHIVE_EXTRACT INPUT "${CMAKE_BINARY_DIR}/_deps/Sparkle-${SPARKLE_VERSION}.tar.xz" DESTINATION "${SPARKLE_DIR}")
+    endif()
+    target_sources(EarFirst PRIVATE src/app/Updater_mac.mm)
+    target_compile_definitions(EarFirst PRIVATE EARFIRST_HAS_SPARKLE=1)
+    target_compile_options(EarFirst PRIVATE "-F${SPARKLE_DIR}")
+    target_link_options(EarFirst PRIVATE "-F${SPARKLE_DIR}" "-Wl,-rpath,@executable_path/../Frameworks")
+    target_link_libraries(EarFirst PRIVATE "-framework Sparkle")
+endif()
+
 # Sign the app after every build, so macOS keeps its permissions (microphone)
 # across rebuilds. Set EARFIRST_SIGN_IDENTITY to your Developer ID, e.g.
 #   cmake -B build -DEARFIRST_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
@@ -174,9 +201,8 @@ endif()
 if (APPLE)
     set(EARFIRST_SIGN_IDENTITY "-" CACHE STRING "Code signing identity for the Ear First app")
     add_custom_command(TARGET EarFirst POST_BUILD
-        COMMAND codesign --force --timestamp=none --options runtime
-                --entitlements "${CMAKE_SOURCE_DIR}/src/app/EarFirst.entitlements"
-                --sign "${EARFIRST_SIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:EarFirst>"
-        COMMENT "Signing Ear First"
+        COMMAND "${CMAKE_SOURCE_DIR}/cmake/sign_mac.sh" "${EARFIRST_SIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:EarFirst>"
+                "${CMAKE_SOURCE_DIR}/src/app/EarFirst.entitlements" "${SPARKLE_DIR}"
+        COMMENT "Embedding Sparkle and signing Ear First"
         VERBATIM)
 endif()

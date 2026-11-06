@@ -79,7 +79,11 @@ AppCore::AppCore (SpeechOutput& out, Options o)
     updates->isSafeToInstall = [this] { return ! isRecordingOrCapturing() && (song == nullptr || ! song->hasUnsavedChanges()); };
     updates->onUpdateFound = [this] (const juce::String& v)
     {
-        speaker.say ("Ear First " + v + " is out. Check for Updates when you're ready.", Speech::Priority::normal, "update");
+        // Once per version, and only while the app is in front.
+        if (v == announcedVersion || ! juce::Process::isForegroundProcess()) return;
+        announcedVersion = v;
+        saveAppSettings();
+        speaker.say ("Ear First " + v + " is out. Check for Updates in the Help menu when you're ready.", Speech::Priority::normal, "update");
     };
 
     registerCommands();
@@ -130,6 +134,7 @@ void AppCore::saveAppSettings()
     auto* o = new juce::DynamicObject();
     o->setProperty ("textScale", textScale);
     o->setProperty ("waitForGaps", speaker.settings.waitForGaps);
+    o->setProperty ("announcedVersion", announcedVersion);
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
     f.replaceWithText (juce::JSON::toString (juce::var (o)));
@@ -141,6 +146,7 @@ void AppCore::loadAppSettings()
     if (! v.isObject()) return;
     textScale = juce::jlimit (0.75f, 3.0f, (float) (double) v.getProperty ("textScale", 1.0));
     speaker.settings.waitForGaps = (bool) v.getProperty ("waitForGaps", true);
+    announcedVersion = v.getProperty ("announcedVersion", {}).toString();
 }
 
 void AppCore::saveKeymap()
@@ -176,6 +182,15 @@ void AppCore::timerCallback()
     const bool playing = song != nullptr && song->getEdit().getTransport().isPlaying();
     if (playing != wasPlaying) { speaker.setPlaying (playing); wasPlaying = playing; }
     speaker.tick (now);
+
+    // A quiet look for updates a minute after launch, then every four hours.
+    if (options.openAudioDevice && now - lastUpdateCheck > (lastUpdateCheck == 0 ? 60.0 : 4 * 3600.0))
+    {
+        // With a test feed set, the first look comes after 5 seconds, not a minute.
+        const double firstWait = juce::SystemStats::getEnvironmentVariable ("EARFIRST_TEST_FEED", {}).isNotEmpty() ? 5.0 : 60.0;
+        if (lastUpdateCheck == 0) lastUpdateCheck = now - 4 * 3600.0 + firstWait;
+        else { lastUpdateCheck = now; updates->checkQuietly(); }
+    }
 
     if (song != nullptr && now - lastAutosave > 30.0)
     {
