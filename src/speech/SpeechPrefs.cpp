@@ -21,8 +21,8 @@ const std::vector<SpeechPrefs::Kind>& SpeechPrefs::kinds()
         { "Forms", "A form's first setting as it opens, and each new choice.", Detail::full, true },
         { "Startup", "What the app says when it opens.", Detail::full, true },
         { "Updates", "A new version being out.", Detail::full, true },
-        { "Answers", "Reports you ask for, like Where am I. Never fully off.", Detail::full, false },
-        { "Errors", "Something that couldn't be done, and why. Never fully off.", Detail::full, false },
+        { "Answers", "Reports you ask for, like Where am I. Always said, full or short.", Detail::full, false },
+        { "Errors", "Something that couldn't be done, and why. Never silent: full, short or a sound.", Detail::full, false },
     };
     return list;
 }
@@ -38,6 +38,7 @@ void SpeechPrefs::setDetail (const juce::String& kind, Detail d)
 {
     for (auto& k : kinds())
         if (k.id == kind && ! k.canBeOff && d == Detail::off) d = Detail::brief;
+    if (kind == "Answers" && d == Detail::sound) d = Detail::brief;   // you asked a question: words
     chosen[kind] = d;
 }
 
@@ -56,11 +57,32 @@ juce::String SpeechPrefs::choose (const Message& m) const
     auto kind = m.answer ? juce::String ("Answers") : m.kind;
     switch (detailFor (kind))
     {
-        case Detail::off:   return {};
+        case Detail::off:
+        case Detail::sound: return {};
         case Detail::brief: return m.brief.isNotEmpty() ? m.brief : firstSentence (m.full);
         case Detail::full:  break;
     }
     return m.full;
+}
+
+bool SpeechPrefs::wantsSound (const Message& m) const
+{
+    if (m.full.isEmpty()) return false;
+    return detailFor (m.answer ? juce::String ("Answers") : m.kind) == Detail::sound;
+}
+
+std::pair<float, float> SpeechPrefs::earconFor (const Message& m)
+{
+    // Each kind its own note, from a pentatonic scale so any two sound well together.
+    static const float scale[] = { 523.3f, 587.3f, 659.3f, 784.0f, 880.0f, 1046.5f, 1174.7f, 1318.5f, 1568.0f, 1760.0f };
+    int index = 0;
+    for (size_t i = 0; i < kinds().size(); ++i)
+        if (kinds()[i].id == m.kind) index = (int) i;
+    const float f = scale[index % 10];
+    if (m.kind == "Errors") return { 330.0f, 247.0f };   // low and falling
+    if (m.toggle == 1) return { f, f * 1.5f };           // on: rising a fifth
+    if (m.toggle == 0) return { f * 1.5f, f };           // off: falling
+    return { f, f };                                     // done: one note, twice as long
 }
 
 juce::var SpeechPrefs::toVar() const

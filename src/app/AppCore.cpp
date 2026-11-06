@@ -85,6 +85,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
             if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
             juce::MessageManager::callAsync ([this, flag, device, m] { if (*flag) handleMidiControl (device, m); });
         };
+        attachIdleEdit();
         capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
         {
             lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
@@ -126,6 +127,18 @@ AppCore::~AppCore()
     if (capture != nullptr) capture->attachEdit (nullptr);
     capture.reset();
     song.reset();
+    idleEdit.reset();
+}
+
+// With no song open, an empty song stays loaded out of sight, so MIDI inputs
+// are still listened to: a footswitch can run New Song, and what you played
+// before the song existed can be kept once it does.
+void AppCore::attachIdleEdit()
+{
+    if (capture == nullptr) return;
+    if (idleEdit == nullptr)
+        idleEdit = Edit::createSingleTrackEdit (engine);
+    capture->attachEdit (idleEdit.get());
 }
 
 namespace
@@ -321,6 +334,11 @@ void AppCore::speak (const Message& m)
 {
     // Your choices decide how much is said; the history always keeps it all.
     lastKind = m.answer ? juce::String ("Answers") : m.kind;
+    if (speechPrefs.wantsSound (m))
+    {
+        lastEarcon = SpeechPrefs::earconFor (m);
+        if (capture != nullptr) capture->playEarcon (lastEarcon.first, lastEarcon.second);
+    }
     const auto text = speechPrefs.choose (m);
     speaker.say (text, m.urgent ? Speech::Priority::urgent : Speech::Priority::normal, m.topic, m.full);
 }
@@ -332,6 +350,11 @@ void AppCore::say (const juce::String& full, const juce::String& kind, const juc
     m.full = full; m.brief = brief; m.kind = kind; m.topic = topic;
     m.urgent = priority == Speech::Priority::urgent;
     lastKind = kind;
+    if (speechPrefs.wantsSound (m))
+    {
+        lastEarcon = SpeechPrefs::earconFor (m);
+        if (capture != nullptr) capture->playEarcon (lastEarcon.first, lastEarcon.second);
+    }
     const auto text = speechPrefs.choose (m);
     speaker.say (text, priority, topic, full);
 }
@@ -563,6 +586,7 @@ juce::String AppCore::closeSong()
     auto name = song->getName();
     if (capture != nullptr) capture->attachEdit (nullptr);
     song.reset();
+    attachIdleEdit();
     if (onSongChanged) onSongChanged();
     return "Closed " + name + ".";
 }
@@ -1273,7 +1297,8 @@ void AppCore::registerCommands()
         for (auto& k : SpeechPrefs::kinds())
         {
             ArgSpec a; a.name = k.id; a.type = ArgSpec::Type::choice; a.description = k.description;
-            a.choices = k.canBeOff ? SpeechPrefs::detailNames() : juce::StringArray { "Full", "Short" };
+            a.choices = k.canBeOff ? SpeechPrefs::detailNames()
+                      : k.id == "Errors" ? juce::StringArray { "Full", "Short", "Sound" } : juce::StringArray { "Full", "Short" };
             a.defaultValue = "Full";
             auto id = k.id;
             a.currentValue = [this, id] { return juce::var (SpeechPrefs::detailNames()[(int) speechPrefs.detailFor (id)]); };

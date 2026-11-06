@@ -20,17 +20,18 @@ struct Message
     juce::String topic;            // messages on the same topic replace each other while waiting
     bool urgent = false;
     bool answer = false;           // a report you asked for
+    int toggle = -1;               // a toggle's new state: 1 on, 0 off, -1 not a toggle
 };
 
 class SpeechPrefs
 {
 public:
-    enum class Detail { full, brief, off };
+    enum class Detail { full, brief, sound, off };
     enum class Places { barsAndTime, bars, time };
 
     struct Kind { juce::String id, description; Detail fallback; bool canBeOff; };
     static const std::vector<Kind>& kinds();
-    static juce::StringArray detailNames()      { return { "Full", "Short", "Off" }; }
+    static juce::StringArray detailNames()      { return { "Full", "Short", "Sound", "Off" }; }
     static juce::StringArray placeNames()       { return { "Bars and time", "Bars and beats", "Time" }; }
 
     Detail detailFor (const juce::String& kind) const;
@@ -39,6 +40,11 @@ public:
 
     // What to say for this message, or empty to say nothing.
     juce::String choose (const Message&) const;
+    // True if this message should be a short tone instead of words.
+    bool wantsSound (const Message&) const;
+    // The tone for a message: two pitches in hertz, each kind its own, rising
+    // for on, falling for off, low and falling for an error.
+    static std::pair<float, float> earconFor (const Message&);
     static juce::String firstSentence (const juce::String&);
 
     juce::var toVar() const;

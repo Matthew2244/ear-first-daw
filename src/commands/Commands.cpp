@@ -219,6 +219,8 @@ void CommandList::say (const CommandResult& r, const Command* c)
     m.urgent = r.urgent || ! r.ok;
     m.answer = c != nullptr && c->isReport && r.ok;
     m.kind = ! r.ok ? juce::String ("Errors") : c != nullptr ? c->category : juce::String ("Errors");
+    if (r.ok && c != nullptr && c->isToggle())
+        if (auto st = c->toggleState()) m.toggle = *st ? 1 : 0;
     host.speak (m);
 }
 

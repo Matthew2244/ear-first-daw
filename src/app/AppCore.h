@@ -35,6 +35,7 @@ public:
               Speech::Priority = Speech::Priority::normal, const juce::String& topic = {});
     SpeechPrefs speechPrefs;
     juce::String lastKind;           // the kind of the last message, for "don't say that kind"
+    std::pair<float, float> lastEarcon { 0, 0 };   // the last tone played instead of words (for the self-test)
     // A place on the timeline, the way you've chosen: bars, time, or both.
     juce::String placeText (const tracktion::Edit&, tracktion::TimePosition) const;
     void beginUndoStep (const juce::String&) override;
@@ -117,6 +118,8 @@ private:
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     Speech speaker;
     std::unique_ptr<Session> song;
+    std::unique_ptr<tracktion::Edit> idleEdit;   // listens to MIDI while no song is open
+    void attachIdleEdit();
     std::unique_ptr<EngineCapture> capture;
     std::unique_ptr<Updater> updates;
     Session::OpenReport lastOpenReport;

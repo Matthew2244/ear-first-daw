@@ -15,6 +15,7 @@
 #include "capture/CaptureRecorder.h"
 #include "capture/TimelineMap.h"
 #include "capture/MidiCapture.h"
+#include <array>
 
 namespace earfirst
 {
@@ -52,6 +53,10 @@ public:
 
     CaptureRecorder* getRecorder()          { return recorder.get(); }
     MidiCapture* getMidi()                  { return midi.get(); }
+
+    // A short tone mixed into the outputs (never the inputs, so never into a
+    // recording): two notes, each about 70 ms. Message thread.
+    void playEarcon (float firstHz, float secondHz);
 
     // Every MIDI message, as it arrives (on a MIDI thread), for controls.
     std::function<void (const juce::String& device, const juce::MidiMessage&)> onMidi;
@@ -107,6 +112,13 @@ private:
     std::atomic<uint32_t> clockVersion { 0 };
     std::atomic<int64_t> clockSample { 0 };
     std::atomic<double> clockStreamTime { 0 };
+
+    struct EarconRequest { float f1 = 0, f2 = 0; };
+    juce::AbstractFifo earconFifo { 16 };
+    std::array<EarconRequest, 16> earconQueue;
+    struct EarconVoice { float f1 = 0, f2 = 0; double phase = 0; int age = 0; bool active = false; };
+    EarconVoice earcon;
+    void renderEarcon (float* const* out, int numOut, int n) noexcept;
 
     int maxBlock = 4096;
     int deviceBlock = 512;

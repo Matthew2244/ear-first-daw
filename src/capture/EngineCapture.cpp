@@ -185,10 +185,43 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     // Inputs first, before the engine can touch the buffers.
     capture (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
+    renderEarcon (out, numOut, n);
     // The clock runs whenever the device does, inputs or not, so MIDI is
     // captured and placed even with no audio inputs open.
     if (sampleRate > 0)
         noteTimeline (n);
+}
+
+void EngineCapture::playEarcon (float f1, float f2)
+{
+    int s1, n1, s2, n2;
+    earconFifo.prepareToWrite (1, s1, n1, s2, n2);
+    if (n1 > 0) { earconQueue[(size_t) s1] = { f1, f2 }; earconFifo.finishedWrite (1); }
+}
+
+void EngineCapture::renderEarcon (float* const* out, int numOut, int n) noexcept
+{
+    if (! earcon.active && earconFifo.getNumReady() > 0)
+    {
+        int s1, n1, s2, n2;
+        earconFifo.prepareToRead (1, s1, n1, s2, n2);
+        if (n1 > 0) { auto r = earconQueue[(size_t) s1]; earcon = { r.f1, r.f2, 0.0, 0, true }; }
+        earconFifo.finishedRead (n1 + n2);
+    }
+    if (! earcon.active || numOut == 0 || sampleRate <= 0) return;
+    const int noteLen = (int) (0.07 * sampleRate);
+    for (int i = 0; i < n && earcon.active; ++i, ++earcon.age)
+    {
+        const int note = earcon.age / noteLen;
+        if (note >= 2) { earcon.active = false; break; }
+        const int pos = earcon.age % noteLen;
+        const float f = note == 0 ? earcon.f1 : earcon.f2;
+        earcon.phase += juce::MathConstants<double>::twoPi * f / sampleRate;
+        const float env = std::min (1.0f, pos / 96.0f) * std::exp (-4.0f * (float) pos / (float) noteLen);
+        const float v = 0.2f * env * (float) std::sin (earcon.phase);
+        for (int c = 0; c < std::min (numOut, 2); ++c)
+            if (out[c] != nullptr) out[c][i] += v;
+    }
 }
 
 bool EngineCapture::capture (const float* const* in, int numIn, int n) noexcept

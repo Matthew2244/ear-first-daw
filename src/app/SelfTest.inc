@@ -200,6 +200,17 @@ int runSelfTest()
         stCheck (out.log.size() == before, "then the click toggle says nothing.");
         press (stKey ('r', cmd | shift));
         stCheck (last().startsWith ("Click"), "but it's still in the history, in full: \"" + last() + "\"");
+        a.set ("Click", "Sound");
+        core->commands().run ("speech.settings", a);
+        const auto said = out.log.size();
+        press (stKey ('c'));
+        const auto first = core->lastEarcon;
+        press (stKey ('c'));
+        const auto second = core->lastEarcon;
+        stCheck (out.log.size() == said && first.first > 0, "with Click set to Sound, the toggle plays a tone and says nothing.");
+        stCheck ((first.second > first.first) != (second.second > second.first), "one way it rises, the other it falls ("
+                 + juce::String (first.first, 0) + " to " + juce::String (first.second, 0) + ", then " + juce::String (second.first, 0)
+                 + " to " + juce::String (second.second, 0) + ").");
         // Put things back for the rest of the test.
         for (auto& k : SpeechPrefs::kinds()) a.set (k.id, "Full");
         a.set ("say places as", "Bars and time");

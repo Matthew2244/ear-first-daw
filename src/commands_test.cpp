@@ -251,10 +251,23 @@ int main()
     Message ans { "Bar 3, beat 2, 4.5 seconds.", {}, "Reports", {}, false, true };
     prefs.setDetail ("Answers", SpeechPrefs::Detail::off);
     check (prefs.choose (ans).isNotEmpty(), "an answer you asked for is always said.");
+    prefs.setDetail ("Transport", SpeechPrefs::Detail::sound);
+    Message on { "Metronome on", {}, "Transport", {}, false, false, 1 }, offM { "Metronome off", {}, "Transport", {}, false, false, 0 };
+    check (prefs.choose (on).isEmpty() && prefs.wantsSound (on), "Sound plays a tone and says nothing.");
+    auto up = SpeechPrefs::earconFor (on), down = SpeechPrefs::earconFor (offM);
+    check (up.second > up.first && down.second < down.first, "turning on rises, turning off falls.");
+    Message err { "No track is selected.", {}, "Errors", {}, true, false, -1 };
+    auto e = SpeechPrefs::earconFor (err);
+    check (e.first < 400 && e.second < e.first, "an error's tone is low and falling.");
+    auto other = SpeechPrefs::earconFor (Message { "Kept.", {}, "Capture", {}, false, false, -1 });
+    check (other.first != up.first, "each kind has its own pitch.");
+    prefs.setDetail ("Answers", SpeechPrefs::Detail::sound);
+    check (prefs.detailFor ("Answers") == SpeechPrefs::Detail::brief, "an answer you asked for can't be only a sound; it stays in words.");
     auto savedPrefs = prefs.toVar();
     SpeechPrefs back; back.fromVar (juce::JSON::parse (juce::JSON::toString (savedPrefs)));
     check (back.detailFor ("Capture") == SpeechPrefs::Detail::off && back.detailFor ("File") == SpeechPrefs::Detail::brief
-           && back.detailFor ("Transport") == SpeechPrefs::Detail::full, "your choices save and load.");
+           && back.detailFor ("Transport") == SpeechPrefs::Detail::sound && back.detailFor ("Tracks") == SpeechPrefs::Detail::full,
+           "your choices save and load, Sound included.");
 
     say ("");
     say ("Keys: writing them for both systems");
