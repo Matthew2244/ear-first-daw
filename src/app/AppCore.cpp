@@ -4,8 +4,27 @@ namespace earfirst
 {
 using namespace tracktion;
 
+juce::File AppCore::appDataFolder()
+{
+    // JUCE's "application data" is ~/Library on the Mac; apps belong in
+    // ~/Library/Application Support. On Windows it's already AppData\Roaming.
+    auto base = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+   #if JUCE_MAC
+    base = base.getChildFile ("Application Support");
+   #endif
+    return base.getChildFile ("Ear First");
+}
+
 namespace
 {
+// The engine's own settings and cache go in the app's folder too.
+struct AppPropertyStorage : public PropertyStorage
+{
+    AppPropertyStorage() : PropertyStorage ("Ear First") {}
+    juce::File getAppCacheFolder() override  { return AppCore::appDataFolder().getChildFile ("Cache"); }
+    juce::File getAppPrefsFolder() override  { return AppCore::appDataFolder(); }
+};
+
 struct AppEngineBehaviour : public EngineBehaviour
 {
     explicit AppEngineBehaviour (bool device) : openDevice (device) {}
@@ -27,7 +46,7 @@ ArgSpec textArg (const char* name, const char* def)
 } // namespace
 
 AppCore::AppCore (SpeechOutput& out, Options o)
-    : engine (std::make_unique<PropertyStorage> ("Ear First"), std::make_unique<UIBehaviour>(),
+    : engine (std::make_unique<AppPropertyStorage>(), std::make_unique<UIBehaviour>(),
               std::make_unique<AppEngineBehaviour> (o.openAudioDevice)),
       options (std::move (o)),
       speaker (out)
@@ -41,8 +60,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         // Capture belongs to the app, not a song: it runs from launch, across
         // songs. Anything left from a run that didn't close cleanly is found
         // first, before a new run starts.
-        auto captureRoot = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                               .getChildFile ("Ear First").getChildFile ("Capture");
+        auto captureRoot = appDataFolder().getChildFile ("Capture");
         captureRoot.createDirectory();
         for (auto& run : captureRoot.findChildFiles (juce::File::findDirectories, false))
             if (CaptureInfo::load (run)) lastOpenReport.leftoverCaptures.add (run);
@@ -97,8 +115,7 @@ juce::String AppCore::startupSentence() const
 
 juce::File AppCore::keymapFile() const
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-               .getChildFile ("Ear First").getChildFile ("Keys.json");
+    return appDataFolder().getChildFile ("Keys.json");
 }
 
 void AppCore::saveKeymap()
@@ -574,8 +591,9 @@ void AppCore::setDefaultKeys()
         k ("Shift+K", "capture.keep", "main", keep2min),
         k ("Primary+Shift+C", "capture.status"),
         k ("Primary+T", "tracks.add"),
-        k ("Down", "tracks.next", "tracks"),
-        k ("Up", "tracks.previous", "tracks"),
+        // Up and Down in the track list are the list's own: it moves and the
+        // screen reader reads each row. tracks.next/previous stay as
+        // commands for control surfaces and the palette.
         k ("Primary+Shift+L", "report.position"),
         k ("Primary+Shift+I", "report.song"),
         k ("Primary+Shift+R", "speech.say-again"),

@@ -281,7 +281,7 @@ juce::String CommandList::describe (const juce::String& id) const
             s << ", " << (*st ? c->onWord : c->offWord);
     if (c->available != nullptr)
         if (auto a = c->available(); ! a.enabled)
-            s << ", not available now: " << (a.reason.isNotEmpty() ? a.reason : juce::String ("no reason given"));
+            s << ", not available now: " << (a.reason.isNotEmpty() ? a.reason.trimCharactersAtEnd (".") : juce::String ("no reason given"));
     s << ". " << c->description;
     if (! c->args.empty())
     {

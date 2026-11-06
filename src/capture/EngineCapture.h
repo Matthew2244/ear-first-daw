@@ -33,6 +33,7 @@ public:
         juce::Array<tracktion::WaveAudioClip*> clips;
         tracktion::TimePosition timelineStart;
         bool linedUpWithSong = false;   // false: the song wasn't playing, so it went at the playhead
+        double secondsBeforeSongStart = 0;   // played before bar 1: kept in the file, hidden at the clip's start
 
         // When the song was looping, every pass around the loop. All of them
         // are in the take's files; `chosenPass` is the one on the tracks.

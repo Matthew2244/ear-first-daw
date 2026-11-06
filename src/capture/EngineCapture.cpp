@@ -193,6 +193,7 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
         // A take that starts before the song's beginning is trimmed to start at zero.
         if (at < TimePosition())
         {
+            k.secondsBeforeSongStart = -at.inSeconds();
             offset = offset + TimeDuration::fromSeconds (-at.inSeconds());
             length = length - TimeDuration::fromSeconds (-at.inSeconds());
             at = TimePosition();
@@ -269,6 +270,9 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
                  + (k.take.files.size() == 1 ? " input" : " inputs") + ", "
                  + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
                  + whereText (*edit, k.timelineStart) + ".";
+    if (k.secondsBeforeSongStart >= 0.5)
+        k.sentence += " The first " + secondsText (k.secondsBeforeSongStart)
+                      + " came before the song's start, so they're tucked in at the start of the clip.";
     if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;
     if (map.hasOverflowed()) k.sentence += " The timing record overflowed, so placement may be off.";
     return k;

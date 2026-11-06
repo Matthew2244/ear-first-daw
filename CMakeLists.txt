@@ -127,6 +127,9 @@ set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
     src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp
     src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/CaptureRecorder.cpp)
+if (APPLE)
+    list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)
+endif()
 set(EARFIRST_APP_DEFS
     JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1 JUCE_STRICT_REFCOUNTEDPOINTER=1
     JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0 TRACKTION_LOG_DEVICES=0
@@ -162,4 +165,18 @@ target_link_libraries(ear-first-selftest PRIVATE ${EARFIRST_APP_LIBS})
 if (APPLE)
     target_compile_options(EarFirst PRIVATE "-fno-aligned-allocation")
     target_compile_options(ear-first-selftest PRIVATE "-fno-aligned-allocation")
+endif()
+
+# Sign the app after every build, so macOS keeps its permissions (microphone)
+# across rebuilds. Set EARFIRST_SIGN_IDENTITY to your Developer ID, e.g.
+#   cmake -B build -DEARFIRST_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+# Left as "-", builds are signed ad hoc and macOS asks again after each rebuild.
+if (APPLE)
+    set(EARFIRST_SIGN_IDENTITY "-" CACHE STRING "Code signing identity for the Ear First app")
+    add_custom_command(TARGET EarFirst POST_BUILD
+        COMMAND codesign --force --timestamp=none --options runtime
+                --entitlements "${CMAKE_SOURCE_DIR}/src/app/EarFirst.entitlements"
+                --sign "${EARFIRST_SIGN_IDENTITY}" "$<TARGET_BUNDLE_DIR:EarFirst>"
+        COMMENT "Signing Ear First"
+        VERBATIM)
 endif()

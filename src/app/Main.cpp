@@ -13,8 +13,21 @@
 
 using namespace earfirst;
 
+#if JUCE_MAC
+namespace earfirst { void announceFromFocusedWindowUtf8 (const char*, bool high); }
+#endif
+
 namespace
 {
+void postToScreenReader (const juce::String& text, juce::AccessibilityHandler::AnnouncementPriority p)
+{
+   #if JUCE_MAC
+    earfirst::announceFromFocusedWindowUtf8 (text.toRawUTF8(), p == juce::AccessibilityHandler::AnnouncementPriority::high);
+   #else
+    juce::AccessibilityHandler::postAnnouncement (text, p);
+   #endif
+}
+
 //==============================================================================
 // Key presses into the keymap's shared form.
 KeyChord chordFromKeyPress (const juce::KeyPress& k)
@@ -67,14 +80,35 @@ struct ScreenReaderOutput : SpeechOutput
     juce::StringArray log;                                // for the self-test
     bool announce = true;
 
+    // VoiceOver drops an announcement posted while focus or a selection is
+    // moving (checked with VoiceOver on the Studio, 6 November 2026). So when
+    // the screen has just changed, the announcement waits until it settles.
+    double settleSeconds = 0.5;
+    void screenChanged()    { lastScreenChange = juce::Time::getMillisecondCounterHiRes() / 1000.0; }
+
     void output (const juce::String& text, bool interrupt) override
     {
         log.add (text);
         if (onText != nullptr && text.isNotEmpty()) onText (text);
-        if (announce && text.isNotEmpty())
-            juce::AccessibilityHandler::postAnnouncement (text, interrupt ? juce::AccessibilityHandler::AnnouncementPriority::high
-                                                                         : juce::AccessibilityHandler::AnnouncementPriority::medium);
+        if (! announce || text.isEmpty()) return;
+
+        const auto priority = interrupt ? juce::AccessibilityHandler::AnnouncementPriority::high
+                                        : juce::AccessibilityHandler::AnnouncementPriority::medium;
+        const double now = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+        const double wait = lastScreenChange + settleSeconds - now;
+        if (wait <= 0)
+        {
+            postToScreenReader (text, priority);
+            return;
+        }
+        juce::Timer::callAfterDelay (juce::roundToInt (wait * 1000.0), [text, priority]
+        {
+            postToScreenReader (text, priority);
+        });
     }
+
+private:
+    double lastScreenChange = 0;
 };
 
 //==============================================================================
@@ -91,6 +125,9 @@ public:
     bool handle (const juce::KeyPress& kp, const juce::String& scope)
     {
         auto chord = chordFromKeyPress (kp);
+        if (auto log = juce::SystemStats::getEnvironmentVariable ("EARFIRST_KEYLOG", {}); log.isNotEmpty())
+            juce::File (log).appendText ("code " + juce::String (kp.getKeyCode()) + " char " + juce::String ((int) kp.getTextCharacter())
+                                         + " mods " + juce::String (kp.getModifiers().getRawFlags()) + " -> " + keysToText ({ chord }) + " in " + scope + "\n");
         if (! chord.isValid()) return false;
         if (isModifierOnly (kp)) return false;
 
@@ -149,7 +186,8 @@ private:
 //==============================================================================
 // The command palette: type to find any command by name, tag or what it
 // does; each result says its keys; Return runs it.
-class Palette : public juce::Component, private juce::TextEditor::Listener, private juce::ListBoxModel
+class Palette : public juce::Component, private juce::TextEditor::Listener, private juce::ListBoxModel,
+                private juce::KeyListener, private juce::Timer
 {
 public:
     Palette (AppCore& c, std::function<void()> closeIt) : core (c), close (std::move (closeIt))
@@ -157,6 +195,7 @@ public:
         search.setTitle ("Find a command");
         search.setDescription ("Type part of a command's name or what it does. Down arrow to the results, Return to run.");
         search.addListener (this);
+        search.addKeyListener (this);   // Down and Up go to the results, not the text
         search.setTextToShowWhenEmpty ("Find a command", juce::Colours::grey);
         addAndMakeVisible (search);
 
@@ -168,6 +207,14 @@ public:
         setSize (560, 420);
     }
 
+    // Typing always goes to the search box: when the dialog opens, focus
+    // lands there, never on the results.
+    void parentHierarchyChanged() override
+    {
+        juce::Component::SafePointer<Palette> self (this);
+        juce::MessageManager::callAsync ([self] { if (self != nullptr && self->isShowing()) self->search.grabKeyboardFocus(); });
+    }
+
     void resized() override
     {
         auto r = getLocalBounds().reduced (12);
@@ -177,6 +224,13 @@ public:
     }
 
     void typeIn (const juce::String& s)          { search.setText (s, false); refresh(); }
+    // Said a moment after typing stops: how many match, and the first.
+    std::function<void (const juce::String&)> onSummary;
+    juce::String summary() const
+    {
+        if (found.empty()) return "No commands match.";
+        return juce::String ((int) found.size()) + (found.size() == 1 ? " command. " : " commands. First: ") + rowText (0);
+    }
     int numResults() const                       { return (int) found.size(); }
     juce::String resultText (int row) const      { return rowText (row); }
     juce::String runRow (int row)
@@ -202,7 +256,28 @@ public:
     }
 
 private:
-    void textEditorTextChanged (juce::TextEditor&) override  { refresh(); }
+    bool keyPressed (const juce::KeyPress& k, juce::Component*) override
+    {
+        if ((k == juce::KeyPress::downKey || k == juce::KeyPress::upKey) && ! found.empty())
+        {
+            stopTimer();
+            results.selectRow (k == juce::KeyPress::upKey ? (int) found.size() - 1 : 0);
+            results.grabKeyboardFocus();
+            return true;
+        }
+        return false;
+    }
+
+    void timerCallback() override
+    {
+        stopTimer();
+        if (auto log = juce::SystemStats::getEnvironmentVariable ("EARFIRST_KEYLOG", {}); log.isNotEmpty())
+            juce::File (log).appendText ("palette timer: focus " + juce::String ((int) search.hasKeyboardFocus (false))
+                                         + " showing " + juce::String ((int) isShowing()) + " summary? " + juce::String ((int) (onSummary != nullptr)) + "\n");
+        if (onSummary && isShowing() && ! results.hasKeyboardFocus (true)) onSummary (summary());
+    }
+
+    void textEditorTextChanged (juce::TextEditor&) override  { refresh(); startTimer (1500); }   // VoiceOver drops it sooner after typing
     void textEditorReturnKeyPressed (juce::TextEditor&) override { runRow (0); }
     void textEditorEscapeKeyPressed (juce::TextEditor&) override { if (close) close(); }
 
@@ -259,7 +334,7 @@ private:
 class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel
 {
 public:
-    MainComponent (AppCore& c, ScreenReaderOutput& out) : core (c), router (c)
+    MainComponent (AppCore& c, ScreenReaderOutput& out) : core (c), router (c), output (out)
     {
         setTitle ("Ear First");
         status.setTitle ("Last message");
@@ -302,6 +377,7 @@ public:
 
     void refresh()
     {
+        output.screenChanged();
         tracks.updateContent();
         if (auto* s = core.session())
         {
@@ -364,7 +440,14 @@ public:
 
     void showPalette()
     {
-        auto* p = new Palette (core, [this] { if (paletteWindow) paletteWindow->exitModalState (0); });
+        auto* p = new Palette (core, [this]
+        {
+            // Focus is about to jump back to the window: hold what the
+            // command says until it lands, or VoiceOver drops it.
+            output.screenChanged();
+            if (paletteWindow) paletteWindow->exitModalState (0);
+        });
+        p->onSummary = [this] (const juce::String& s) { core.speech().say (s, Speech::Priority::quiet, "palette"); };
         palette = p;
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned (p);
@@ -448,6 +531,7 @@ private:
     }
 
     AppCore& core;
+    ScreenReaderOutput& output;
     std::map<int, juce::String> menuIds;
 };
 
@@ -503,12 +587,15 @@ public:
         core->onOpenSongRequested = [this] { chooseSong(); };
         window->setVisible (true);
         window->content->tracks.grabKeyboardFocus();
+        output.screenChanged();
 
+        // Said once the window has focus and VoiceOver has finished
+        // describing it, or it gets dropped.
         auto hello = core->startupSentence();
-        juce::Timer::callAfterDelay (600, [this, hello]
+        juce::Timer::callAfterDelay (1500, [this, hello]
         {
             if (core == nullptr) return;
-            core->speech().say ("Ear First. Press Command-N for a new song, Command-O to open one, or Command-Shift-P to find any command."
+            core->speech().say ("Press Command-N for a new song, Command-O to open one, or Command-Shift-P to find any command."
                                 + (hello.isNotEmpty() ? " " + hello : juce::String()));
         });
     }

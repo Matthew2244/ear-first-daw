@@ -86,11 +86,11 @@ int runSelfTest()
     stCheck (mc->getNumRows() == 2 && last().startsWith ("Redid"), "Shift-Command-Z redoes it: \"" + last() + "\"");
 
     core->selectedTrack = 0;
-    press (stKey (juce::KeyPress::downKey), "tracks");
-    stCheck (last().contains ("2 of 2"), "Down in the track list moves and says where: \"" + last() + "\"");
-    press (stKey (juce::KeyPress::downKey), "tracks");
+    stCheck (! press (stKey (juce::KeyPress::downKey), "tracks"), "Down in the track list is left to the list itself, which the screen reader reads natively.");
+    core->commands().run ("tracks.next");
+    stCheck (last().contains ("2 of 2"), "the Next track command, for surfaces and the palette, says where: \"" + last() + "\"");
+    core->commands().run ("tracks.next");
     stCheck (last().startsWith ("Last track."), "at the end it says so: \"" + last() + "\"");
-    stCheck (! press (stKey (juce::KeyPress::downKey), "main") , "Down outside the track list is left alone for the window.");
 
     press (stKey ('l', cmd | shift));
     stCheck (last().startsWith ("Bar 1, beat 1"), "Shift-Command-L says where the playhead is: \"" + last() + "\"");
@@ -125,7 +125,9 @@ int runSelfTest()
         stCheck (p.numResults() > 0 && p.resultText (0).startsWith ("Keep, not available now"), "a command that can't run now says so in the list: \""
                  + (p.numResults() > 0 ? p.resultText (0) : juce::String()) + "\"");
         p.typeIn ("zzz");
-        stCheck (p.numResults() == 0, "nonsense finds nothing.");
+        stCheck (p.numResults() == 0 && p.summary() == "No commands match.", "nonsense finds nothing, and says so.");
+        p.typeIn ("metro");
+        stCheck (p.summary().startsWith ("1 command. Metronome") || p.summary().contains ("First: Metronome"), "the summary says how many and the first: \"" + p.summary() + "\"");
     }
 
     stSay ("");

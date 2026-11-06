@@ -559,7 +559,10 @@ static juce::String describeDuration (double seconds)
 {
     if (seconds < 90)   return juce::String (juce::roundToInt (seconds)) + " seconds";
     if (seconds < 5400) return juce::String (juce::roundToInt (seconds / 60)) + " minutes";
-    return juce::String (seconds / 3600, 1) + " hours";
+    const double hours = seconds / 3600;
+    if (hours >= 10)   // "about 4749 hours", not "4749.0"
+        return juce::String (juce::roundToInt (hours)) + " hours";
+    return juce::String (hours, 1) + " hours";
 }
 
 juce::String CaptureRecorder::status() const

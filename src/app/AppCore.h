@@ -52,6 +52,7 @@ public:
 
     // The user's keys live here.
     juce::File keymapFile() const;
+    static juce::File appDataFolder();   // ~/Library/Application Support/Ear First on the Mac
     void saveKeymap();
 
     static constexpr int keymapDefaultsVersion = 1;
