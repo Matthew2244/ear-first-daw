@@ -125,9 +125,13 @@ private:
     std::unique_ptr<EngineCapture> capture;
     std::unique_ptr<Updater> updates;
     Session::OpenReport lastOpenReport;
-    double lastAutosave = 0, lastUpdateCheck = 0;
+    double lastAutosave = 0, lastUpdateCheck = 0, lastSpaceCheck = 0;
     juce::String announcedVersion;
     juce::String setAsideNote;
+    // Per interface, the inputs that carry the computer's own sound.
+    std::map<juce::String, juce::StringArray> computerInputs;
+    mutable std::mutex computerInputsLock;
+    juce::StringArray computerInputsOn (const juce::String& interfaceName) const;
     juce::String preferredInput, preferredOutput;   // the interface you chose; tried first at every launch
     juce::String startupProblem;   // said at startup: an interface that wouldn't answer
     juce::String savedInterfaceThatWontAnswer();   // said after a device switch kept the old capture

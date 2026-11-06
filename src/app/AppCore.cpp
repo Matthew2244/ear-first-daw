@@ -81,6 +81,8 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
         capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
         capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
+        capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
+        capture->refreshComputerInputs();
         capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
         {
             if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
@@ -109,6 +111,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
     registerCommands();
     setDefaultKeys();
     if (options.openAudioDevice) loadAppSettings();   // the self-test starts from defaults
+    if (capture) capture->refreshComputerInputs();     // the marks were just loaded
 
     juce::StringArray moved;
     if (auto f = keymapFile(); options.saveSettings && f.existsAsFile())
@@ -291,12 +294,15 @@ juce::String AppCore::leftoverSentence() const
                     midiEvents += (int64_t) m->eventsIn (d, std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max()).size();
         }
     if (secs < 0.5 && midiEvents == 0) return {};
+    bool allClean = true;
+    for (auto& run : lastOpenReport.leftoverCaptures) allClean &= run.getChildFile ("closed cleanly").existsAsFile();
     auto mins = juce::roundToInt (secs / 60.0);
     juce::StringArray what;
     if (secs >= 0.5) what.add ((secs < 90 ? juce::String (juce::roundToInt (secs)) + " seconds" : juce::String (mins) + " minutes") + " of audio");
     if (midiEvents > 0) what.add ("some MIDI");
-    return "The app didn't close properly last time. " + what.joinIntoString (" and ")
-           + " captured then was never kept. Use Keep recovered audio, or Throw away recovered audio.";
+    return (allClean ? "From last time: " + what.joinIntoString (" and ") + " you didn't keep. "
+                     : "The app didn't close properly last time. " + what.joinIntoString (" and ") + " captured then was never kept. ")
+           + "Use Keep recovered audio, or Throw away recovered audio.";
 }
 
 juce::File AppCore::keymapFile() const
@@ -314,6 +320,18 @@ void AppCore::saveAppSettings()
     o->setProperty ("speech", speechPrefs.toVar());
     o->setProperty ("preferredInput", preferredInput);
     o->setProperty ("preferredOutput", preferredOutput);
+    {
+        std::lock_guard<std::mutex> g (computerInputsLock);
+        auto* ci = new juce::DynamicObject();
+        for (auto& [iface, names] : computerInputs)
+            if (! names.isEmpty())
+            {
+                juce::Array<juce::var> list;
+                for (auto& n : names) list.add (n);
+                ci->setProperty (iface, list);
+            }
+        o->setProperty ("computerInputs", juce::var (ci));
+    }
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
     f.replaceWithText (juce::JSON::toString (juce::var (o)));
@@ -329,6 +347,19 @@ void AppCore::loadAppSettings()
     speechPrefs.fromVar (v.getProperty ("speech", {}));
     preferredInput = v.getProperty ("preferredInput", {}).toString();
     preferredOutput = v.getProperty ("preferredOutput", {}).toString();
+    std::lock_guard<std::mutex> g (computerInputsLock);
+    computerInputs.clear();
+    if (auto* ci = v.getProperty ("computerInputs", {}).getDynamicObject())
+        for (auto& p : ci->getProperties())
+            if (auto* arr = p.value.getArray())
+                for (auto& n : *arr) computerInputs[p.name.toString()].add (n.toString());
+}
+
+juce::StringArray AppCore::computerInputsOn (const juce::String& iface) const
+{
+    std::lock_guard<std::mutex> g (computerInputsLock);
+    auto it = computerInputs.find (iface);
+    return it != computerInputs.end() ? it->second : juce::StringArray();
 }
 
 void AppCore::saveKeymap()
@@ -420,6 +451,23 @@ void AppCore::timerCallback()
         const double firstWait = juce::SystemStats::getEnvironmentVariable ("EARFIRST_TEST_FEED", {}).isNotEmpty() ? 5.0 : 60.0;
         if (lastUpdateCheck == 0) lastUpdateCheck = now - 4 * 3600.0 + firstWait;
         else { lastUpdateCheck = now; updates->checkQuietly(); }
+    }
+
+    // Space running low: recovered audio goes first, oldest first, so live
+    // capture never has to give anything up for it. Said each time.
+    if (capture != nullptr && now - lastSpaceCheck > 30.0 && ! lastOpenReport.leftoverCaptures.isEmpty())
+    {
+        lastSpaceCheck = now;
+        auto root = appDataFolder().getChildFile ("Capture");
+        if (root.getBytesFreeOnVolume() < (int64_t) 6 * 1024 * 1024 * 1024)
+        {
+            auto& runs = lastOpenReport.leftoverCaptures;
+            std::sort (runs.begin(), runs.end(), [] (auto& a, auto& b) { return a.getFileName() < b.getFileName(); });
+            auto oldest = runs.removeAndReturn (0);
+            const auto name = oldest.getFileName();
+            oldest.deleteRecursively();
+            say ("The disk is nearly full, so the oldest recovered audio, from " + name + ", was cleared to keep capture going.", "Capture");
+        }
     }
 
     if (song != nullptr && now - lastAutosave > 30.0)
@@ -1028,7 +1076,22 @@ void AppCore::registerCommands()
         c.undoable = true;
         c.run = [this] (const CommandArgs& a)
         {
-            auto k = capture->keepLast ((double) a["seconds"], song->audioFolder());
+            const double secs = (double) a["seconds"];
+            // A big keep (hours, or many inputs) exports in the background, so the
+            // window and the screen reader never freeze; it says when it's done.
+            if (capture->keepSize (secs) > 20000.0)
+            {
+                capture->keepLastInBackground (secs, song->audioFolder(), [this] (const EngineCapture::Kept& k)
+                {
+                    if (onSongChanged) onSongChanged();
+                    if (k.take.ok()) say (k.sentence, "Capture", k.brief);
+                    else say (k.sentence, "Errors", {}, Speech::Priority::urgent);
+                });
+                const auto mins = juce::roundToInt (secs / 60.0);
+                return CommandResult::done ("Keeping " + (secs < 90 ? juce::String (juce::roundToInt (secs)) + " seconds" : juce::String (mins) + " minutes")
+                                            + ". I'll say when it's done; you can keep working.", "Keeping.");
+            }
+            auto k = capture->keepLast (secs, song->audioFolder());
             if (onSongChanged) onSongChanged();
             return k.take.ok() ? CommandResult::done (k.sentence, k.brief) : CommandResult::failed (k.sentence);
         };
@@ -1229,6 +1292,41 @@ void AppCore::registerCommands()
         {
             auto s = setAudio ({}, args["interface"].toString(), 0, 0);
             return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.computer-input"; c.name = "Computer's own sound"; c.category = "Audio";
+        c.description = "Marks an input as carrying the computer's own sound, like the last two channels on a StudioLive, "
+                        "or unmarks it. It's still captured, but sound on it never counts as you playing, "
+                        "so quitting doesn't keep a session where only the computer made noise.";
+        c.tags = { "return", "loopback", "computer audio", "daw return", "not a source" };
+        ArgSpec a; a.name = "input"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this] { return capture ? capture->getInputNames() : juce::StringArray(); };
+        a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this] { return capture == nullptr || capture->getInputNames().isEmpty() ? Availability::no ("No audio inputs are open.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            const auto input = args["input"].toString();
+            const auto iface = capture->getInterfaceName();
+            if (! capture->getInputNames().contains (input)) return CommandResult::failed ("There's no input called " + input + ".");
+            bool nowMarked;
+            juce::StringArray all;
+            {
+                std::lock_guard<std::mutex> g (computerInputsLock);
+                auto& list = computerInputs[iface];
+                nowMarked = ! list.contains (input);
+                if (nowMarked) list.add (input); else list.removeString (input);
+                all = list;
+            }
+            capture->refreshComputerInputs();
+            saveAppSettings();
+            juce::String s = input + (nowMarked ? " is marked as the computer's own sound." : " is no longer marked as the computer's own sound.");
+            s << (all.isEmpty() ? juce::String (" No inputs on ") + iface + " are marked."
+                                : " Marked on " + iface + ": " + all.joinIntoString (", ") + ".");
+            return CommandResult::done (s, input + (nowMarked ? " marked." : " unmarked."));
         };
         add (c);
     }

@@ -51,8 +51,34 @@ public:
     // its own track (made if needed, named after the input).
     Kept keepLast (double seconds, const juce::File& takesFolder);
 
+    // The same, with the export (the slow part) on a thread of its own, so a
+    // long keep never freezes the window. `done` runs on the message thread
+    // once the clips are on the timeline.
+    void keepLastInBackground (double seconds, const juce::File& takesFolder, std::function<void (const Kept&)> done);
+    // Roughly how long exporting would take, in seconds of audio times inputs.
+    double keepSize (double seconds) const   { return seconds * juce::jmax (1, numInputs); }
+
     CaptureRecorder* getRecorder()          { return recorder.get(); }
     MidiCapture* getMidi()                  { return midi.get(); }
+    bool keepOnQuit = true;                 // leave unkept capture on disk at a clean quit, offered next time
+    // Since the last keep: did any input go from quiet to loud (someone
+    // started playing), and was a note played? Quitting only keeps capture
+    // that had something in it. An input that's loud all along (a return of
+    // the computer's own audio, a hum) never counts.
+    std::vector<char> inputWasQuiet;            // per input, audio thread only; sized before audio starts
+    std::array<std::atomic<bool>, 512> computerInput {};   // per input: the computer's own sound
+    std::atomic<bool> playingStartedSinceKeep { false };
+    std::atomic<bool> notePlayedSinceKeep { false };
+    int numMidiListeners() const            { return (int) midiTaps.size(); }   // for tests
+
+    // Inputs that carry the computer's own sound (a return of what it plays,
+    // like channels 63 and 64 on a StudioLive). They're still captured, but
+    // sound on them never counts as you playing. The app answers this for
+    // each interface by name, whenever one starts. Any thread.
+    std::function<juce::StringArray (const juce::String& interfaceName)> computerInputsFor;
+    void refreshComputerInputs();             // message thread: after you change the list
+    juce::StringArray getInputNames() const   { std::lock_guard<std::mutex> g (namesLock); return inputNames; }
+    juce::String getInterfaceName() const     { std::lock_guard<std::mutex> g (namesLock); return interfaceName; }
 
     // A short tone mixed into the outputs (never the inputs, so never into a
     // recording): two notes, each about 70 ms. Message thread.
@@ -84,11 +110,13 @@ private:
 
     tracktion::Engine& engine;
     juce::File captureFolder;
-    std::unique_ptr<CaptureRecorder> recorder;
+    std::shared_ptr<CaptureRecorder> recorder;   // shared: a keep exporting in the background holds it
     TimelineMap map;
     double sampleRate = 0;
     int numInputs = 0;
     juce::StringArray inputNames;
+    juce::String interfaceName;
+    mutable std::mutex namesLock;               // inputNames and interfaceName, read from the message thread
 
     tracktion::Edit* edit = nullptr;
     std::atomic<tracktion::EditPlaybackContext*> context { nullptr };
@@ -102,11 +130,28 @@ private:
         EngineCapture& owner;
         juce::String device;
     };
+    // The engine can throw its playback context away and make a new one
+    // (a device plugged in, a render). It says so only afterwards, so the
+    // stored pointer is switched at once, and nothing that unhooks listeners
+    // trusts the stored one: it asks the transport for the current context.
+    struct TransportWatch : tracktion::TransportControl::Listener
+    {
+        explicit TransportWatch (EngineCapture& o) : owner (o) {}
+        void playbackContextChanged() override  { owner.contextChanged(); }
+        EngineCapture& owner;
+    };
+    TransportWatch transportWatch { *this };
+    void contextChanged();
+    tracktion::EditPlaybackContext* currentContext() const;
+
     void midiArrived (const juce::String& device, const juce::MidiMessage&);
     void attachMidiTaps();
     void changeListenerCallback (juce::ChangeBroadcaster*) override   { startTimer (700); }   // devices changed
     void timerCallback() override                                      { stopTimer(); attachMidiTaps(); }
     void placeMidi (Kept&, tracktion::TimePosition at, tracktion::TimeDuration length, int64_t captureStart, const juce::String& takeName);
+    Kept finishKeep (Kept, const juce::String& name);   // placement and the sentence, message thread
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
+    std::vector<std::thread> keepThreads;
     void detachMidiTaps();
     std::vector<std::pair<tracktion::InputDeviceInstance*, std::unique_ptr<MidiTap>>> midiTaps;
     std::unique_ptr<MidiCapture> midi;

@@ -10,6 +10,7 @@
 #include <tracktion_engine/testing/tracktion_EnginePlayer.h>
 #include "capture/EngineCapture.h"
 #include <iostream>
+#include <optional>
 #include <thread>
 
 using namespace tracktion;
@@ -357,6 +358,17 @@ int main (int argc, char** argv)
         checkPlacement (engine, k, 64, 6.0 + lag, "Test 5", true);
         say ("Test 5: keeping 64 inputs and putting them on 64 tracks took " + juce::String (juce::roundToInt (ms)) + " milliseconds.");
         check (rig.capture->getRecorder() != nullptr && rig.capture->getRecorder()->getDroppedSamples() == 0, "Test 5: nothing dropped.");
+
+        // The same keep in the background: the call returns at once, the clips
+        // arrive later, placed exactly the same.
+        auto before = juce::Time::getMillisecondCounterHiRes();
+        std::optional<earfirst::EngineCapture::Kept> later;
+        rig.capture->keepLastInBackground (10, rig.takes().getChildFile ("background"), [&later] (const earfirst::EngineCapture::Kept& k) { later = k; });
+        auto returned = juce::Time::getMillisecondCounterHiRes() - before;
+        for (int i = 0; i < 200 && ! later; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        check (returned < 50, "Test 5: a background keep returns at once (" + juce::String (juce::roundToInt (returned)) + " ms).");
+        check (later.has_value() && later->take.ok(), "Test 5: and finishes: " + (later ? later->sentence : juce::String ("nothing yet")));
+        if (later) checkPlacement (engine, *later, 64, 6.0 + lag, "Test 5 in the background", true);
     }
 
     // 6. Looping: loop 4 to 8 seconds, play from 4, keep 10 seconds = two full
@@ -442,6 +454,33 @@ int main (int argc, char** argv)
                    "Test 6c: all 200 events from the keyboard come back, in order, at the right times.");
         }
         dir.deleteRecursively();
+    }
+
+    // 6d. The engine replaces its playback context (as when a device is
+    //     plugged in). Capture must carry on, and MIDI must still be heard.
+    {
+        say ("");
+        say ("Test 6d: the engine rebuilds its playback context mid-session.");
+        Rig rig (engine, 2, false);
+        auto& tc = rig.edit->getTransport();
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (2.0);
+        tc.stop (false, true);
+        tc.freePlaybackContext();
+        tc.ensureContextAllocated();
+        // The listener comes back on a timer; give a busy machine up to 3 seconds.
+        for (int i = 0; i < 30 && rig.capture->numMidiListeners() != 1; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        check (rig.capture->numMidiListeners() == 1, "Test 6d: the MIDI listener moved to the new context.");
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+        rig.feedMidi (4.0, { { 1.0, juce::MidiMessage::noteOn (1, 62, (juce::uint8) 90) }, { 1.5, juce::MidiMessage::noteOff (1, 62) } });
+        auto k = rig.capture->keepLast (3.5, rig.takes());
+        tc.stop (false, true);
+        check (k.take.ok(), "Test 6d: capture carried on through it: \"" + k.sentence + "\"");
+        check (k.midiClips.size() == 1, "Test 6d: MIDI is heard on the new context (" + juce::String (k.midiClips.size()) + " MIDI clips).");
     }
 
     // 7. MIDI: a note at 6 seconds, the pedal down at 2, a note held past the end.

@@ -30,9 +30,28 @@ EngineCapture::EngineCapture (Engine& e, juce::File folder)
 
 EngineCapture::~EngineCapture()
 {
+    *alive = false;
+    for (auto& t : keepThreads) if (t.joinable()) t.join();   // let exports finish writing their files
     stopTimer();
     engine.getDeviceManager().removeChangeListener (this);
     detachMidiTaps();
+    // Quitting never throws away what you played: anything captured is left
+    // on disk, marked as a clean close, and offered next time.
+    if (keepOnQuit)
+    {
+        // Something worth offering: sound above a quiet room (about -50 dB) or a
+        // note played since the last keep. An app left open in silence leaves nothing.
+        const bool hadAudio = recorder != nullptr && recorder->getPushedSamples() > (int64_t) (sampleRate * 0.5)
+                              && playingStartedSinceKeep.load();
+        const bool hadMidi = midi != nullptr && notePlayedSinceKeep.load();
+        if (hadAudio || hadMidi)
+        {
+            auto run = recorder != nullptr ? recorder->getStore().getFolder() : midi->getFolder().getParentDirectory();
+            if (recorder != nullptr) recorder->keepFilesOnClose();
+            if (midi != nullptr) midi->keepFilesOnClose();
+            run.getChildFile ("closed cleanly").replaceWithText (juce::Time::getCurrentTime().toISO8601 (true));
+        }
+    }
     midi.reset();
     auto& jdm = engine.getDeviceManager().deviceManager;
     jdm.removeAudioCallback (this);
@@ -42,13 +61,30 @@ EngineCapture::~EngineCapture()
         recorder->stop();
 }
 
+tracktion::EditPlaybackContext* EngineCapture::currentContext() const
+{
+    return edit != nullptr ? edit->getTransport().getCurrentPlaybackContext() : nullptr;
+}
+
+void EngineCapture::contextChanged()
+{
+    // The old context may already be gone: forget our listeners on it without
+    // touching them (they went with it), and switch the audio thread over.
+    midiTaps.clear();
+    {
+        const juce::ScopedLock sl (engine.getDeviceManager().deviceManager.getAudioCallbackLock());
+        context.store (currentContext());
+    }
+    startTimer (50);   // listen to the new context's MIDI inputs once it's built
+}
+
 void EngineCapture::detachMidiTaps()
 {
     // When a device is unplugged the engine rebuilds its inputs and deletes
     // the old ones, our listeners with them. Only unhook from inputs that
     // still exist (unplugging the test keyboard crashed it, 6 November 2026).
     juce::Array<InputDeviceInstance*> live;
-    if (auto* ctx = context.load())
+    if (auto* ctx = currentContext())
         live = ctx->getAllInputs();
     for (auto& [instance, tap] : midiTaps)
         if (live.contains (instance))
@@ -59,7 +95,9 @@ void EngineCapture::detachMidiTaps()
 void EngineCapture::attachEdit (Edit* e)
 {
     detachMidiTaps();
+    if (edit != nullptr) edit->getTransport().removeListener (&transportWatch);
     edit = e;
+    if (edit != nullptr) edit->getTransport().addListener (&transportWatch);
     EditPlaybackContext* ctx = nullptr;
     if (e != nullptr)
     {
@@ -81,7 +119,7 @@ void EngineCapture::attachMidiTaps()
     // Listen to every MIDI input of this song, armed or not. Called again when
     // devices change, since the engine rebuilds its inputs then.
     detachMidiTaps();
-    auto* ctx = context.load();
+    auto* ctx = currentContext();
     if (ctx == nullptr) return;
     for (auto& mi : engine.getDeviceManager().getMidiInDevices())
         if (! mi->isEnabled()) mi->setEnabled (true);
@@ -113,6 +151,7 @@ void EngineCapture::midiArrived (const juce::String& device, const juce::MidiMes
     } while (v1 != v2 || (v1 & 1u) != 0);
     const auto sample = pos + (int64_t) std::llround ((m.getTimeStamp() - stream) * sampleRate);
     mc->add (device, sample, m);
+    if (m.isNoteOn()) notePlayedSinceKeep = true;
     if (onMidi) onMidi (device, m);
 }
 
@@ -133,9 +172,16 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         if (active[i]) newNames.add (names[i].isNotEmpty() ? names[i] : "Input " + juce::String (i + 1));
     const double rate = device->getCurrentSampleRate();
 
+    {
+        std::lock_guard<std::mutex> g (namesLock);
+        interfaceName = device->getName();
+    }
     // Same device, same inputs: carry on with the capture we have.
     if ((recorder != nullptr || midi != nullptr) && rate == sampleRate && newNames == inputNames)
+    {
+        refreshComputerInputs();
         return;
+    }
 
     // MIDI keeps arriving on its own threads while the device restarts, so
     // stop listening before the MIDI capture is replaced (a keyboard sending
@@ -158,7 +204,11 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     map.reset();   // the new run's clock starts at zero; old anchors don't belong to it
     sampleRate = rate;
     numInputs = newNames.size();
-    inputNames = newNames;
+    {
+        std::lock_guard<std::mutex> g (namesLock);
+        inputNames = newNames;
+    }
+    refreshComputerInputs();
     deviceBlock = device->getCurrentBufferSizeSamples();
     // A fresh folder every time: a restart in the same second must never
     // reuse (and overwrite) a run that was just set aside.
@@ -181,7 +231,8 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     o.inputNames = inputNames;
     o.maxBlockSize = maxBlock = std::max (4096, device->getCurrentBufferSizeSamples());
     chunk.assign ((size_t) numInputs, nullptr);
-    recorder = std::make_unique<CaptureRecorder> (o);
+    inputWasQuiet.assign ((size_t) numInputs, 0);
+    recorder = std::make_shared<CaptureRecorder> (o);
     midi = std::make_unique<MidiCapture> (o.folder.getChildFile ("midi"), rate);
     attachMidiTaps();
 }
@@ -255,6 +306,15 @@ bool EngineCapture::capture (const float* const* in, int numIn, int n) noexcept
     auto* rec = recorder.get();
     if (rec == nullptr || numIn != numInputs) return false;
 
+    for (int c = 0; c < numIn && c < (int) inputWasQuiet.size(); ++c)
+        if (in[c] != nullptr && ! (c < (int) computerInput.size() && computerInput[(size_t) c].load (std::memory_order_relaxed)))
+        {
+            auto r = juce::FloatVectorOperations::findMinAndMax (in[c], n);
+            const float peak = std::max (std::abs (r.getStart()), std::abs (r.getEnd()));
+            if (peak < 0.003f) inputWasQuiet[(size_t) c] = 1;                         // about -50 dB: a quiet moment
+            else if (peak > 0.03f && inputWasQuiet[(size_t) c]) playingStartedSinceKeep.store (true, std::memory_order_relaxed);   // then -30 dB: playing
+        }
+
     for (int done = 0; done < n;)
     {
         const int len = std::min (n - done, maxBlock);
@@ -274,7 +334,12 @@ void EngineCapture::noteTimeline (int n) noexcept
     const auto pos = blockStart.load (std::memory_order_relaxed);
     bool playing = false;
     int64_t editSample = 0;
-    if (auto* ctx = context.load (std::memory_order_acquire))
+    auto* ctx = context.load (std::memory_order_acquire);
+    // Only use it if it's still the transport's current one (a freed context
+    // is replaced, and switched over, as soon as the engine says so).
+    if (ctx != nullptr && edit != nullptr && edit->getTransport().getCurrentPlaybackContext() != ctx)
+        ctx = nullptr;
+    if (ctx != nullptr)
     {
         playing = ctx->isPlaying();
         if (playing)
@@ -389,7 +454,38 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
         k.take.start = std::max<int64_t> (0, k.take.end - (int64_t) std::llround (seconds * sampleRate));
         if (k.take.end <= k.take.start) { k.take.error = "There's nothing in that stretch of time."; k.sentence = k.take.error; return k; }
     }
+    return finishKeep (std::move (k), name);
+}
 
+void EngineCapture::keepLastInBackground (double seconds, const juce::File& takesFolder, std::function<void (const Kept&)> done)
+{
+    if (recorder == nullptr || edit == nullptr)
+    {
+        done (keepLast (seconds, takesFolder));   // nothing slow to do
+        return;
+    }
+    auto rec = recorder;   // keeps the recorder alive even if the interface changes meanwhile
+    auto name = "Take " + juce::String (++takeNumber);
+    juce::Array<int> all;
+    for (int i = 0; i < numInputs; ++i) all.add (i);
+    keepThreads.emplace_back ([this, rec, all, seconds, takesFolder, name, done, flag = alive]
+    {
+        Kept k;
+        k.take = rec->keepLast (seconds, all, takesFolder, name);
+        juce::MessageManager::callAsync ([this, k, name, done, flag]() mutable
+        {
+            if (! *flag) return;
+            if (! k.take.ok()) { k.sentence = k.take.error; done (k); return; }
+            if (edit == nullptr) { k.take.error = "The song closed before the take was ready; its files are in the takes folder."; k.sentence = k.take.error; done (k); return; }
+            done (finishKeep (std::move (k), name));
+        });
+    });
+}
+
+EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
+{
+    playingStartedSinceKeep = false;
+    notePlayedSinceKeep = false;
     const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
     ensureContentTracks (*edit, numInputs);
     auto tracks = contentTracks (*edit);
@@ -507,6 +603,19 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;
     if (map.hasOverflowed()) k.sentence += " The timing record overflowed, so placement may be off.";
     return k;
+}
+
+void EngineCapture::refreshComputerInputs()
+{
+    juce::StringArray names, marked;
+    juce::String iface;
+    {
+        std::lock_guard<std::mutex> g (namesLock);
+        names = inputNames; iface = interfaceName;
+    }
+    if (computerInputsFor != nullptr) marked = computerInputsFor (iface);
+    for (size_t i = 0; i < computerInput.size(); ++i)
+        computerInput[i] = (int) i < names.size() && marked.contains (names[(int) i]);
 }
 
 } // namespace earfirst
