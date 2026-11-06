@@ -130,6 +130,14 @@ private:
     juce::String setAsideNote;
     // Per interface, the inputs that carry the computer's own sound.
     std::map<juce::String, juce::StringArray> computerInputs;
+    std::map<juce::String, juce::StringArray> notComputerInputs;   // ones you unmarked: never marked again by itself
+    void markComputerInputs (const juce::String& interfaceName, const juce::StringArray& inputs, bool evenIfUnmarked);
+public:
+    // Plays the sweep and marks what comes back. firstTime: only if this
+    // interface has never been checked, and says it's the first time.
+    void findComputerInputs (bool firstTime);
+private:
+    juce::StringArray checkedInterfaces;
     mutable std::mutex computerInputsLock;
     juce::StringArray computerInputsOn (const juce::String& interfaceName) const;
     juce::String preferredInput, preferredOutput;   // the interface you chose; tried first at every launch

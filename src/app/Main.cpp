@@ -790,7 +790,31 @@ public:
             if (auto p = core->startupProblemSentence(); p.isNotEmpty()) core->say (p, "Errors");
             if (auto l = core->leftoverSentence(); l.isNotEmpty()) core->say (l, "Capture");
         });
+        // A new interface gets checked once for the computer's own sound, after the welcome.
+        juce::Timer::callAfterDelay (5000, [this] { if (core != nullptr) core->findComputerInputs (true); });
+        runCommandsFrom (args, 3000);
     }
+
+    // Commands named on the command line run once the app is ready, each as if
+    // chosen from the menu: open -a "Ear First" --args --run audio.find-computer-input
+    // Works on a running copy too, so scripts and macros can drive it.
+    void runCommandsFrom (const juce::String& args, int delayMs)
+    {
+        auto tokens = juce::StringArray::fromTokens (args, true);
+        juce::StringArray ids;
+        for (int i = 0; i + 1 < tokens.size(); ++i)
+            if (tokens[i] == "--run") ids.add (tokens[i + 1].unquoted());
+        if (ids.isEmpty()) return;
+        juce::Timer::callAfterDelay (delayMs, [this, ids]
+        {
+            if (core == nullptr) return;
+            for (auto& id : ids)
+                if (core->commands().find (id) == nullptr) core->say ("There's no command called " + id + ".", "Errors");
+                else core->runFromUser (id, CommandList::Source::menu);
+        });
+    }
+
+    void anotherInstanceStarted (const juce::String& args) override   { runCommandsFrom (args, 0); }
 
     void shutdown() override
     {

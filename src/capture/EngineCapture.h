@@ -15,6 +15,8 @@
 #include "capture/CaptureRecorder.h"
 #include "capture/TimelineMap.h"
 #include "capture/MidiCapture.h"
+#include "capture/ReturnFinder.h"
+#include <map>
 #include <array>
 
 namespace earfirst
@@ -67,7 +69,8 @@ public:
     // the computer's own audio, a hum) never counts.
     std::vector<char> inputWasQuiet;            // per input, audio thread only; sized before audio starts
     std::array<std::atomic<bool>, 512> computerInput {};   // per input: the computer's own sound
-    std::atomic<bool> playingStartedSinceKeep { false };
+    std::array<std::atomic<bool>, 512> playingStarted {};   // per input, since the last keep
+    bool playingStartedSinceKeep() const;   // on any input not marked as the computer's own sound
     std::atomic<bool> notePlayedSinceKeep { false };
     int numMidiListeners() const            { return (int) midiTaps.size(); }   // for tests
 
@@ -77,6 +80,16 @@ public:
     // each interface by name, whenever one starts. Any thread.
     std::function<juce::StringArray (const juce::String& interfaceName)> computerInputsFor;
     void refreshComputerInputs();             // message thread: after you change the list
+
+    // Finding them by itself (see ReturnFinder): while Ear First plays something
+    // with sound across the range (the song, the click), each input is compared
+    // with what went out. Inputs that match twice are reported here, on the
+    // message thread, with the interface's name.
+    std::function<void (const juce::String& interfaceName, const juce::StringArray& inputs)> onComputerInputsFound;
+    // On purpose: plays a soft sweep, then reports which inputs carried it back.
+    // `problem` says why it couldn't tell, if it couldn't. Message thread.
+    void findComputerInputsNow (std::function<void (const juce::StringArray& found, const juce::String& problem)> done);
+    void playSweep()                          { sweepRequested = true; }   // just the sound (tests)
     juce::StringArray getInputNames() const   { std::lock_guard<std::mutex> g (namesLock); return inputNames; }
     juce::String getInterfaceName() const     { std::lock_guard<std::mutex> g (namesLock); return interfaceName; }
 
@@ -168,6 +181,33 @@ private:
     struct EarconVoice { float f1 = 0, f2 = 0; double phase = 0; int age = 0; bool active = false; };
     EarconVoice earcon;
     void renderEarcon (float* const* out, int numOut, int n) noexcept;
+
+    // What went out, summed to one channel, on the capture clock (audio thread writes).
+    static constexpr int outRingSize = 1 << 19;
+    std::vector<float> outRing = std::vector<float> ((size_t) outRingSize, 0.0f);
+    std::atomic<int64_t> outWritten { 0 };
+    // The sweep: made when the device starts, played when asked.
+    std::vector<float> sweep;
+    std::atomic<bool> sweepRequested { false };
+    std::atomic<int64_t> sweepStartedAt { -1 };
+    int64_t sweepPos = -1;                       // audio thread
+    void renderSweep (float* const* out, int numOut, int n, int64_t blockPos) noexcept;
+
+    // Message thread: a check every second, on a thread of its own.
+    struct ReturnTimer : juce::Timer
+    {
+        explicit ReturnTimer (EngineCapture& o) : owner (o) {}
+        void timerCallback() override   { owner.checkForReturns(); }
+        EngineCapture& owner;
+    };
+    ReturnTimer returnTimer { *this };
+    void checkForReturns();
+    juce::ThreadPool returnPool { 1 };
+    std::atomic<bool> returnCheckBusy { false };
+    int64_t returnCheckedUpTo = 0;
+    std::map<juce::String, int> returnHits, notReturnCount;   // per input, this run
+    std::function<void (const juce::StringArray&, const juce::String&)> sweepDone;
+    juce::uint32 sweepAskedAt = 0;
 
     int maxBlock = 4096;
     int deviceBlock = 512;

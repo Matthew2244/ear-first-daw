@@ -26,11 +26,14 @@ EngineCapture::EngineCapture (Engine& e, juce::File folder)
     // finishes a restart on the message thread. Finish it now, so the engine
     // is never left paused waiting for it.
     dm.dispatchPendingUpdates();
+    returnTimer.startTimer (1000);
 }
 
 EngineCapture::~EngineCapture()
 {
     *alive = false;
+    returnTimer.stopTimer();
+    returnPool.removeAllJobs (true, 5000);
     for (auto& t : keepThreads) if (t.joinable()) t.join();   // let exports finish writing their files
     stopTimer();
     engine.getDeviceManager().removeChangeListener (this);
@@ -42,7 +45,7 @@ EngineCapture::~EngineCapture()
         // Something worth offering: sound above a quiet room (about -50 dB) or a
         // note played since the last keep. An app left open in silence leaves nothing.
         const bool hadAudio = recorder != nullptr && recorder->getPushedSamples() > (int64_t) (sampleRate * 0.5)
-                              && playingStartedSinceKeep.load();
+                              && playingStartedSinceKeep();
         const bool hadMidi = midi != nullptr && notePlayedSinceKeep.load();
         if (hadAudio || hadMidi)
         {
@@ -204,6 +207,8 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     map.reset();   // the new run's clock starts at zero; old anchors don't belong to it
     sampleRate = rate;
     numInputs = newNames.size();
+    sweep = makeSweep (rate);
+    returnHits.clear(); notReturnCount.clear(); returnCheckedUpTo = 0;
     {
         std::lock_guard<std::mutex> g (namesLock);
         inputNames = newNames;
@@ -248,6 +253,7 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     clockVersion.fetch_add (1, std::memory_order_acq_rel);
 
     // Inputs first, before the engine can touch the buffers.
+    const auto blockPos = blockStart.load (std::memory_order_relaxed);
     capture (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
     if (onOutputLevel)
@@ -263,6 +269,15 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
         onOutputLevel (peak);
     }
     renderEarcon (out, numOut, n);
+    renderSweep (out, numOut, n, blockPos);
+    // Note what went out, to compare with what comes back in.
+    for (int i = 0; i < n; ++i)
+    {
+        float v = 0;
+        for (int c = 0; c < std::min (numOut, 2); ++c) if (out[c] != nullptr) v += out[c][i];
+        outRing[(size_t) ((blockPos + i) & (outRingSize - 1))] = v;
+    }
+    outWritten.store (blockPos + n, std::memory_order_release);
     // The clock runs whenever the device does, inputs or not, so MIDI is
     // captured and placed even with no audio inputs open.
     if (sampleRate > 0)
@@ -312,7 +327,7 @@ bool EngineCapture::capture (const float* const* in, int numIn, int n) noexcept
             auto r = juce::FloatVectorOperations::findMinAndMax (in[c], n);
             const float peak = std::max (std::abs (r.getStart()), std::abs (r.getEnd()));
             if (peak < 0.003f) inputWasQuiet[(size_t) c] = 1;                         // about -50 dB: a quiet moment
-            else if (peak > 0.03f && inputWasQuiet[(size_t) c]) playingStartedSinceKeep.store (true, std::memory_order_relaxed);   // then -30 dB: playing
+            else if (peak > 0.03f && inputWasQuiet[(size_t) c]) playingStarted[(size_t) c].store (true, std::memory_order_relaxed);   // then -30 dB: playing
         }
 
     for (int done = 0; done < n;)
@@ -484,7 +499,7 @@ void EngineCapture::keepLastInBackground (double seconds, const juce::File& take
 
 EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
 {
-    playingStartedSinceKeep = false;
+    for (auto& p : playingStarted) p = false;
     notePlayedSinceKeep = false;
     const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
     ensureContentTracks (*edit, numInputs);
@@ -616,6 +631,127 @@ void EngineCapture::refreshComputerInputs()
     if (computerInputsFor != nullptr) marked = computerInputsFor (iface);
     for (size_t i = 0; i < computerInput.size(); ++i)
         computerInput[i] = (int) i < names.size() && marked.contains (names[(int) i]);
+}
+
+void EngineCapture::renderSweep (float* const* out, int numOut, int n, int64_t blockPos) noexcept
+{
+    if (sweepRequested.exchange (false) && ! sweep.empty())
+    {
+        sweepPos = 0;
+        sweepStartedAt.store (blockPos, std::memory_order_release);
+    }
+    if (sweepPos < 0) return;
+    for (int i = 0; i < n && sweepPos < (int64_t) sweep.size(); ++i, ++sweepPos)
+        for (int c = 0; c < std::min (numOut, 2); ++c)
+            if (out[c] != nullptr) out[c][i] += sweep[(size_t) sweepPos];
+    if (sweepPos >= (int64_t) sweep.size()) sweepPos = -1;
+}
+
+void EngineCapture::findComputerInputsNow (std::function<void (const juce::StringArray&, const juce::String&)> done)
+{
+    if (recorder == nullptr) { done ({}, "No audio inputs are open."); return; }
+    sweepStartedAt = -1;
+    sweepDone = std::move (done);
+    sweepAskedAt = juce::Time::getMillisecondCounter();
+    sweepRequested = true;
+}
+
+void EngineCapture::checkForReturns()
+{
+    auto rec = recorder;
+    if (rec == nullptr || sampleRate <= 0 || returnCheckBusy) return;
+
+    // What's safely on disk: a second behind what's been captured.
+    const int64_t onDisk = rec->getPushedSamples() - (int64_t) sampleRate;
+    const int maxLag = 8192;   // up to 170 ms at 48 kHz: a round trip through the interface
+    int64_t start = 0; int len = 0; bool forSweep = false;
+
+    if (sweepDone != nullptr)
+    {
+        const auto at = sweepStartedAt.load (std::memory_order_acquire);
+        if (at < 0)
+        {
+            // Asked, but the sweep hasn't started: the device isn't running.
+            if (juce::Time::getMillisecondCounter() - sweepAskedAt > 3000)
+            {
+                sweepRequested = false;
+                auto d = std::move (sweepDone); sweepDone = nullptr;
+                d ({}, "The interface isn't running, so nothing could be played.");
+            }
+            return;
+        }
+        if (onDisk < at + (int64_t) sweep.size() + maxLag) return;   // not all back yet
+        start = std::max<int64_t> (0, at - 2000); len = (int) (at + (int64_t) sweep.size() + 2000 + maxLag - start); forSweep = true;
+    }
+    else
+    {
+        len = 32768;   // about 0.7 seconds: room for a beat or two of the click
+        start = onDisk - len;
+        if (start < returnCheckedUpTo + len) return;   // a fresh window each time
+    }
+    if (start < 0 || start - maxLag < outWritten.load() - outRingSize + 1000) return;
+    returnCheckedUpTo = start;
+
+    std::vector<float> out ((size_t) (len + maxLag));
+    double energy = 0;
+    for (int i = 0; i < len + maxLag; ++i)
+    {
+        const auto at = start - maxLag + i;
+        const float v = at < 0 ? 0.0f : outRing[(size_t) (at & (outRingSize - 1))];   // before the run began: silence
+        out[(size_t) i] = v; energy += (double) v * v;
+    }
+    if (! forSweep && energy / (len + maxLag) < 1.0e-6) return;   // nothing played: nothing to compare
+
+    std::vector<int> which;
+    juce::StringArray names = getInputNames();
+    for (int c = 0; c < names.size() && c < (int) computerInput.size(); ++c)
+        if (forSweep || (! computerInput[(size_t) c] && notReturnCount[names[c]] < 5))
+            which.push_back (c);
+    if (which.empty()) return;
+
+    returnCheckBusy = true;
+    const double sr = sampleRate;
+    returnPool.addJob ([this, flag = alive, rec, names, which, out = std::move (out), start, len, maxLag, sr, forSweep]
+    {
+        juce::StringArray returns, notReturns;
+        bool heardAnything = false;
+        std::vector<int> ints ((size_t) len);
+        std::vector<float> in ((size_t) len);
+        for (int c : which)
+        {
+            if (! *flag) break;
+            if (! rec->getStore().readRange (c, start, len, ints.data())) continue;
+            for (int i = 0; i < len; ++i) in[(size_t) i] = (float) ints[(size_t) i] / 2147483648.0f;
+            auto r = checkReturn (out.data(), in.data(), len, maxLag, sr);
+            heardAnything |= r.enoughSignal && r.correlation > 0.5;
+            if (r.isReturn) returns.add (names[c]);
+            else if (r.enoughSignal && r.bands >= 10 && r.correlation < 0.5) notReturns.add (names[c]);
+        }
+        juce::MessageManager::callAsync ([this, flag, returns, notReturns, heardAnything, forSweep]
+        {
+            if (! *flag) return;
+            returnCheckBusy = false;
+            if (forSweep)
+            {
+                auto d = std::move (sweepDone); sweepDone = nullptr;
+                if (d) d (returns, returns.isEmpty() && ! heardAnything ? "The sweep didn't come back on any input." : juce::String());
+                return;
+            }
+            juce::StringArray found;
+            for (auto& n : returns) if (++returnHits[n] == 2) found.add (n);
+            for (auto& n : notReturns) ++notReturnCount[n];
+            if (! found.isEmpty() && onComputerInputsFound) onComputerInputsFound (getInterfaceName(), found);
+        });
+    });
+}
+
+bool EngineCapture::playingStartedSinceKeep() const
+{
+    // Judged at the time it's asked, so an input found to be the computer's
+    // own sound later on no longer counts for what it did before.
+    for (size_t c = 0; c < playingStarted.size(); ++c)
+        if (playingStarted[c].load() && ! computerInput[c].load()) return true;
+    return false;
 }
 
 } // namespace earfirst

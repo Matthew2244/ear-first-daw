@@ -82,6 +82,10 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
         capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
         capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
+        capture->onComputerInputsFound = [this] (const juce::String& iface, const juce::StringArray& found)
+        {
+            markComputerInputs (iface, found, false);
+        };
         capture->refreshComputerInputs();
         capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
         {
@@ -331,6 +335,18 @@ void AppCore::saveAppSettings()
                 ci->setProperty (iface, list);
             }
         o->setProperty ("computerInputs", juce::var (ci));
+        auto* nci = new juce::DynamicObject();
+        for (auto& [iface, names] : notComputerInputs)
+            if (! names.isEmpty())
+            {
+                juce::Array<juce::var> list;
+                for (auto& n : names) list.add (n);
+                nci->setProperty (iface, list);
+            }
+        o->setProperty ("notComputerInputs", juce::var (nci));
+        juce::Array<juce::var> checked;
+        for (auto& n : checkedInterfaces) checked.add (n);
+        o->setProperty ("checkedInterfaces", checked);
     }
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
@@ -353,6 +369,83 @@ void AppCore::loadAppSettings()
         for (auto& p : ci->getProperties())
             if (auto* arr = p.value.getArray())
                 for (auto& n : *arr) computerInputs[p.name.toString()].add (n.toString());
+    checkedInterfaces.clear();
+    if (auto* arr = v.getProperty ("checkedInterfaces", {}).getArray())
+        for (auto& n : *arr) checkedInterfaces.add (n.toString());
+    notComputerInputs.clear();
+    if (auto* nci = v.getProperty ("notComputerInputs", {}).getDynamicObject())
+        for (auto& p : nci->getProperties())
+            if (auto* arr = p.value.getArray())
+                for (auto& n : *arr) notComputerInputs[p.name.toString()].add (n.toString());
+}
+
+void AppCore::findComputerInputs (bool firstTime)
+{
+    if (capture == nullptr || capture->getInputNames().isEmpty()) return;
+    const auto iface = capture->getInterfaceName();
+    if (firstTime)
+    {
+        // Once per interface: the first time it's used, with words before the sound.
+        if (checkedInterfaces.contains (iface) || ! options.openAudioDevice) return;
+        checkedInterfaces.add (iface);
+        saveAppSettings();
+        say ("First time with " + iface + ". Listen for a short, soft sweep: it checks which inputs carry the computer's own sound.",
+             "Audio", "Listen for a sweep.", Speech::Priority::normal, "find-return");
+    }
+    else
+        say ("Listen for a short, soft sweep. It checks which inputs carry the computer's own sound.",
+             "Audio", "Listen for a sweep.", Speech::Priority::normal, "find-return");
+
+    juce::Timer::callAfterDelay (firstTime ? 4000 : 2500, [this, flag = alive, firstTime]
+    {
+        if (! *flag || capture == nullptr) return;
+        capture->findComputerInputsNow ([this, flag, firstTime] (const juce::StringArray& found, const juce::String& problem)
+        {
+            if (! *flag || capture == nullptr) return;
+            juce::AudioDeviceManager::AudioDeviceSetup s;
+            engine.getDeviceManager().deviceManager.getAudioDeviceSetup (s);
+            const auto iface = capture->getInterfaceName();
+            if (! found.isEmpty())
+            {
+                markComputerInputs (iface, found, ! firstTime);
+                const bool one = found.size() == 1;
+                say (found.joinIntoString (" and ") + (one ? " carries" : " carry") + " the computer's own sound. "
+                     + (one ? "It's" : "They're") + " marked, so sound on " + (one ? "it" : "them") + " won't count as you playing."
+                     + (firstTime ? " Computer's own sound, in the Audio menu, changes that." : ""),
+                     "Audio", "Found " + found.joinIntoString (" and ") + ".", Speech::Priority::normal, "find-return");
+                return;
+            }
+            juce::String s2 = problem.isNotEmpty() ? problem + " " : juce::String();
+            s2 << "No input on " << iface << " carries the computer's own sound.";
+            if (s.inputDeviceName != s.outputDeviceName)
+                s2 << " You're playing through " << s.outputDeviceName << ", so its sound can only come back there.";
+            say (s2, "Audio", "None found.", Speech::Priority::normal, "find-return");
+        });
+    });
+}
+
+void AppCore::markComputerInputs (const juce::String& iface, const juce::StringArray& inputs, bool evenIfUnmarked)
+{
+    juce::StringArray added;
+    {
+        std::lock_guard<std::mutex> g (computerInputsLock);
+        auto& list = computerInputs[iface];
+        auto& not_ = notComputerInputs[iface];
+        for (auto& n : inputs)
+        {
+            if (list.contains (n)) continue;
+            if (not_.contains (n)) { if (! evenIfUnmarked) continue; not_.removeString (n); }
+            list.add (n); added.add (n);
+        }
+    }
+    if (added.isEmpty()) return;
+    if (capture) capture->refreshComputerInputs();
+    saveAppSettings();
+    if (evenIfUnmarked) return;   // the command that asked says it
+    const bool one = added.size() == 1;
+    say (added.joinIntoString (" and ") + (one ? " carries" : " carry") + " the computer's own sound, so sound on "
+         + (one ? "it" : "them") + " won't count as you playing. Computer's own sound, in the Audio menu, changes that.",
+         "Audio", added.joinIntoString (" and ") + " marked as the computer's own sound.");
 }
 
 juce::StringArray AppCore::computerInputsOn (const juce::String& iface) const
@@ -1273,7 +1366,9 @@ void AppCore::registerCommands()
         c.run = [this] (const CommandArgs& args)
         {
             auto s = setAudio (args["interface"].toString(), {}, 0, 0);
-            return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+            if (s.startsWith ("That didn't")) return CommandResult::failed (s);
+            juce::Timer::callAfterDelay (3000, [this, flag = alive] { if (*flag) findComputerInputs (true); });   // a new one gets checked once
+            return CommandResult::done (s);
         };
         add (c);
     }
@@ -1319,6 +1414,8 @@ void AppCore::registerCommands()
                 auto& list = computerInputs[iface];
                 nowMarked = ! list.contains (input);
                 if (nowMarked) list.add (input); else list.removeString (input);
+                auto& not_ = notComputerInputs[iface];   // unmarked by you: never marked again by itself
+                if (nowMarked) not_.removeString (input); else not_.addIfNotAlreadyThere (input);
                 all = list;
             }
             capture->refreshComputerInputs();
@@ -1327,6 +1424,19 @@ void AppCore::registerCommands()
             s << (all.isEmpty() ? juce::String (" No inputs on ") + iface + " are marked."
                                 : " Marked on " + iface + ": " + all.joinIntoString (", ") + ".");
             return CommandResult::done (s, input + (nowMarked ? " marked." : " unmarked."));
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.find-computer-input"; c.name = "Find the computer's own sound"; c.category = "Audio";
+        c.description = "Plays a short, soft sweep and listens for it on every input. Inputs that carry it straight back "
+                        "are the computer's own sound, and get marked. Ear First also notices by itself while the song or click plays.";
+        c.tags = { "return", "loopback", "detect", "computer audio" };
+        c.available = [this] { return capture == nullptr || capture->getInputNames().isEmpty() ? Availability::no ("No audio inputs are open.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs&)
+        {
+            findComputerInputs (false);
+            return CommandResult::done();
         };
         add (c);
     }

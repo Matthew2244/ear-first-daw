@@ -65,7 +65,7 @@ target_link_libraries(capture-live PRIVATE
 juce_add_console_app(capture-engine-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(capture-engine-test)
 target_compile_features(capture-engine-test PRIVATE cxx_std_20)
-target_sources(capture-engine-test PRIVATE src/capture_engine_test.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp)
+target_sources(capture-engine-test PRIVATE src/capture_engine_test.cpp src/capture/EngineCapture.cpp src/capture/ReturnFinder.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp)
 target_include_directories(capture-engine-test PRIVATE src)
 target_compile_definitions(capture-engine-test PRIVATE
     JUCE_PLUGINHOST_AU=1
@@ -126,7 +126,7 @@ endif()
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
     src/commands/Commands.cpp src/commands/Keymap.cpp src/commands/MidiControls.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
-    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp)
+    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/ReturnFinder.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp)
 if (APPLE)
     list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)
 endif()
@@ -230,3 +230,18 @@ target_link_libraries(click-test PRIVATE
 if (APPLE)
     target_compile_options(click-test PRIVATE "-fno-aligned-allocation")
 endif()
+
+# return-finder-test: telling the computer's own sound apart from a mic, on made-up signals.
+juce_add_console_app(return-finder-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+target_compile_features(return-finder-test PRIVATE cxx_std_20)
+target_sources(return-finder-test PRIVATE src/return_finder_test.cpp src/capture/ReturnFinder.cpp)
+target_include_directories(return-finder-test PRIVATE src)
+target_link_libraries(return-finder-test PRIVATE juce::juce_recommended_config_flags)
+
+# return-probe: plays the sweep through a real interface and says which inputs are returns.
+juce_add_console_app(return-probe NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+target_compile_features(return-probe PRIVATE cxx_std_20)
+target_sources(return-probe PRIVATE src/tools/return_probe.cpp src/capture/ReturnFinder.cpp)
+target_include_directories(return-probe PRIVATE src)
+target_compile_definitions(return-probe PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(return-probe PRIVATE juce::juce_audio_devices juce::juce_recommended_config_flags)

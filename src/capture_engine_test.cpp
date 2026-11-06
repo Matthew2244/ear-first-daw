@@ -150,6 +150,37 @@ struct Rig
         }
     }
 
+    // In real time, block by block, with the message loop running: input 0
+    // hears unrelated noise, input 1 is a return (what went out, one block
+    // later, 6 dB down), input 2 is a mic hearing a dull speaker.
+    void feedLoopback (double seconds)
+    {
+        auto total = (int64_t) std::llround (seconds * sr);
+        juce::AudioBuffer<float> in (params.inputChannels, block), lastOut (2, block);
+        lastOut.clear();
+        juce::Random rnd (3);
+        float lp = 0;
+        const float a = std::exp (-2.0f * 3.14159265f * 1500.0f / (float) sr);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int64_t done = 0; done < total; done += block)
+        {
+            in.clear();
+            for (int i = 0; i < block; ++i)
+            {
+                const float o = lastOut.getSample (0, i) + lastOut.getSample (1, i);
+                lp = (1 - a) * o + a * lp;
+                in.setSample (0, i, (rnd.nextFloat() - 0.5f) * 0.1f);
+                if (params.inputChannels > 1) in.setSample (1, i, 0.5f * o);
+                if (params.inputChannels > 2) in.setSample (2, i, lp);
+            }
+            auto out = player->process (in);
+            for (int c = 0; c < 2; ++c) lastOut.copyFrom (c, 0, out, juce::jmin (c, out.getNumChannels() - 1), 0, block);
+            auto due = (double) (done + block) / sr * 1000.0;
+            while (juce::Time::getMillisecondCounterHiRes() - t0 < due)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+        }
+    }
+
     // `seconds` of silence with MIDI messages at the given times (seconds from
     // the start of this call), one device block at a time, as a real device would.
     void feedMidi (double seconds, std::vector<std::pair<double, juce::MidiMessage>> events)
@@ -481,6 +512,32 @@ int main (int argc, char** argv)
         tc.stop (false, true);
         check (k.take.ok(), "Test 6d: capture carried on through it: \"" + k.sentence + "\"");
         check (k.midiClips.size() == 1, "Test 6d: MIDI is heard on the new context (" + juce::String (k.midiClips.size()) + " MIDI clips).");
+    }
+
+    // 6e. Finding the computer's own sound: the sweep, and by itself.
+    {
+        say ("");
+        say ("Test 6e: which inputs carry the computer's own sound. Input 1 is noise, input 2 a return, input 3 a mic on a dull speaker.");
+        {
+            Rig rig (engine, 3, false);
+            juce::StringArray found; juce::String problem; bool answered = false;
+            rig.capture->findComputerInputsNow ([&] (const juce::StringArray& f, const juce::String& p) { found = f; problem = p; answered = true; });
+            rig.feedLoopback (4.0);
+            for (int i = 0; i < 50 && ! answered; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+            const auto names = rig.capture->getInputNames();
+            check (answered && found.size() == 1 && found[0] == names[1],
+                   "Test 6e: the sweep finds the return and only the return (" + juce::String (answered ? "answered" : "no answer") + ", found: " + found.joinIntoString (", ") + (problem.isNotEmpty() ? "; " + problem : juce::String()) + ").");
+        }
+        {
+            Rig rig (engine, 3, false);
+            juce::StringArray found;
+            rig.capture->onComputerInputsFound = [&] (const juce::String&, const juce::StringArray& f) { found.addArray (f); };
+            for (int i = 0; i < 10; ++i) { rig.capture->playSweep(); rig.feedLoopback (0.6); }
+            rig.feedLoopback (2.0);
+            const auto names = rig.capture->getInputNames();
+            check (found.size() == 1 && found[0] == names[1],
+                   "Test 6e: while sound plays, it finds the return by itself (found: " + found.joinIntoString (", ") + ").");
+        }
     }
 
     // 7. MIDI: a note at 6 seconds, the pedal down at 2, a note held past the end.
