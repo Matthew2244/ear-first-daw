@@ -14,11 +14,12 @@
 #include <JuceHeader.h>
 #include "capture/CaptureRecorder.h"
 #include "capture/TimelineMap.h"
+#include "capture/MidiCapture.h"
 
 namespace earfirst
 {
 
-class EngineCapture : private juce::AudioIODeviceCallback
+class EngineCapture : private juce::AudioIODeviceCallback, private juce::ChangeListener, private juce::Timer
 {
 public:
     EngineCapture (tracktion::Engine&, juce::File captureFolder);
@@ -31,6 +32,7 @@ public:
     {
         TakeResult take;
         juce::Array<tracktion::WaveAudioClip*> clips;
+        juce::Array<tracktion::MidiClip*> midiClips;     // one per MIDI device that played
         tracktion::TimePosition timelineStart;
         bool linedUpWithSong = false;   // false: the song wasn't playing, so it went at the playhead
         double secondsBeforeSongStart = 0;   // played before bar 1: kept in the file, hidden at the clip's start
@@ -48,6 +50,7 @@ public:
     Kept keepLast (double seconds, const juce::File& takesFolder);
 
     CaptureRecorder* getRecorder()          { return recorder.get(); }
+    MidiCapture* getMidi()                  { return midi.get(); }
 
     // The interface changed: what was captured on the old one is kept on
     // disk, never thrown away, and handed over here (folder, seconds).
@@ -75,6 +78,29 @@ private:
     std::atomic<tracktion::EditPlaybackContext*> context { nullptr };
     std::atomic<int64_t> blockStart { 0 };   // capture sample where the current block begins
     int takeNumber = 0;
+    // MIDI: a listener on each MIDI input of the attached song.
+    struct MidiTap : tracktion::InputDeviceInstance::Consumer
+    {
+        MidiTap (EngineCapture& o, juce::String d) : owner (o), device (std::move (d)) {}
+        void handleIncomingMidiMessage (const juce::MidiMessage& m, tracktion::MPESourceID) override { owner.midiArrived (device, m); }
+        EngineCapture& owner;
+        juce::String device;
+    };
+    void midiArrived (const juce::String& device, const juce::MidiMessage&);
+    void attachMidiTaps();
+    void changeListenerCallback (juce::ChangeBroadcaster*) override   { startTimer (700); }   // devices changed
+    void timerCallback() override                                      { stopTimer(); attachMidiTaps(); }
+    void placeMidi (Kept&, tracktion::TimePosition at, tracktion::TimeDuration length, int64_t captureStart, const juce::String& takeName);
+    void detachMidiTaps();
+    std::vector<std::pair<tracktion::InputDeviceInstance*, std::unique_ptr<MidiTap>>> midiTaps;
+    std::unique_ptr<MidiCapture> midi;
+
+    // The engine's clock at the start of the current block, paired with the
+    // capture sample there, so MIDI timestamps map onto the capture clock.
+    std::atomic<uint32_t> clockVersion { 0 };
+    std::atomic<int64_t> clockSample { 0 };
+    std::atomic<double> clockStreamTime { 0 };
+
     int maxBlock = 4096;
     int deviceBlock = 512;
     std::vector<const float*> chunk;   // sized before audio starts

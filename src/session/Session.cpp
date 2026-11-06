@@ -200,8 +200,13 @@ bool Session::writeSong (const juce::File& dest)
 
 juce::String Session::currentState() const
 {
+    // The playhead's position is saved in the song, but moving it isn't a
+    // change anyone should be asked to save, so it's left out of the comparison.
     edit->flushState();
-    return edit->state.toXmlString();
+    auto copy = edit->state.createCopy();
+    auto transport = copy.getChildWithName (tracktion::IDs::TRANSPORT);
+    if (transport.isValid()) transport.removeProperty (tracktion::IDs::position, nullptr);
+    return copy.toXmlString();
 }
 
 bool Session::hasUnsavedChanges() const

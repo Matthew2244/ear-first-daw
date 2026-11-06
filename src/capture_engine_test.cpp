@@ -69,6 +69,8 @@ struct Rig
         player = std::make_unique<test_utilities::EnginePlayer> (engine, params);
         for (auto wi : engine.getDeviceManager().getWaveInputDevices())
             wi->setEnabled (armForNormalRecording);
+        for (auto mi : engine.getDeviceManager().getMidiInDevices())
+            mi->setEnabled (true);
 
         folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("ear-first-engine", {});
         folder.createDirectory();
@@ -137,6 +139,52 @@ struct Rig
             while (juce::Time::getMillisecondCounterHiRes() - t0 < due)
                 std::this_thread::sleep_for (std::chrono::milliseconds (1));
         }
+    }
+
+    // `seconds` of silence with MIDI messages at the given times (seconds from
+    // the start of this call), one device block at a time, as a real device would.
+    void feedMidi (double seconds, std::vector<std::pair<double, juce::MidiMessage>> events)
+    {
+        auto total = (int64_t) std::llround (seconds * sr);
+        juce::AudioBuffer<float> in (params.inputChannels, block);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int64_t done = 0; done < total; done += block)
+        {
+            in.clear();
+            juce::MidiBuffer midi;
+            for (auto& [t, m] : events)
+            {
+                auto s = (int64_t) std::llround (t * sr);
+                if (s >= done && s < done + block) midi.addEvent (m, (int) (s - done));
+            }
+            player->process (in, midi);
+            auto due = (double) (done + block) / sr / 4.0 * 1000.0;
+            while (juce::Time::getMillisecondCounterHiRes() - t0 < due)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        }
+    }
+
+    void armMidiForNormalRecording()
+    {
+        auto context = edit->getTransport().getCurrentPlaybackContext();
+        auto tracks = getAudioTracks (*edit);
+        for (auto* i : context->getAllInputs())
+            if (i->owner.isMidi())
+            {
+                [[maybe_unused]] auto r = i->setTarget (tracks[0]->itemID, true, nullptr, 0);
+                i->setRecordingEnabled (tracks[0]->itemID, true);
+            }
+        edit->dispatchPendingUpdatesSynchronously();
+    }
+
+    juce::Array<MidiClip*> midiClips()
+    {
+        juce::Array<MidiClip*> out;
+        for (auto t : getAudioTracks (*edit))
+            for (auto c : t->getClips())
+                if (auto m = dynamic_cast<MidiClip*> (c))
+                    out.add (m);
+        return out;
     }
 
     juce::Array<WaveAudioClip*> clips()
@@ -340,6 +388,89 @@ int main (int argc, char** argv)
                 say ("  anchor: capture " + juce::String (an.captureSample) + ", timeline " + juce::String (an.editSample)
                      + (an.playing ? ", playing" : ", stopped"));
         }
+    }
+
+    // 7. MIDI: a note at 6 seconds, the pedal down at 2, a note held past the end.
+    {
+        say ("");
+        say ("Test 7: MIDI, song playing. Pedal down at 2 seconds, a note at 6 for half a second, another held from 9.5 past the end.");
+        const std::vector<std::pair<double, juce::MidiMessage>> events = {
+            { 2.0, juce::MidiMessage::controllerEvent (1, 64, 127) },
+            { 6.0, juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) },
+            { 6.5, juce::MidiMessage::noteOff (1, 60) },
+            { 9.5, juce::MidiMessage::noteOn (1, 64, (juce::uint8) 90) },
+        };
+
+        // The yardstick: the engine's own MIDI recording of the same note.
+        double reference = -1;
+        {
+            Rig rig (engine, 2, false);
+            rig.armMidiForNormalRecording();
+            auto& tc = rig.edit->getTransport();
+            tc.record (false, false);
+            rig.edit->dispatchPendingUpdatesSynchronously();
+            rig.feedMidi (10.0, events);
+            tc.stop (false, true);
+            for (auto* c : rig.midiClips())
+                for (auto* n : c->getSequence().getNotes())
+                    if (n->getNoteNumber() == 60) reference = n->getEditStartTime (*c).inSeconds();
+            say ("For comparison, the engine's own MIDI recording puts the note played at 6 seconds at " + juce::String (reference, 4)
+                 + " seconds, " + juce::String ((6.0 - reference) * sr, 0) + " samples away from where its own audio recording puts a click from the same moment."
+                 + " Ear First lines MIDI up with the audio instead.");
+        }
+
+        Rig rig (engine, 2, false);
+        auto& tc = rig.edit->getTransport();
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feedMidi (10.0, events);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        say ("Test 7 says: " + k.sentence);
+        check (k.midiClips.size() == 1, "Test 7: one MIDI clip, for the one MIDI input.");
+        if (! k.midiClips.isEmpty())
+        {
+            auto* c = k.midiClips[0];
+            auto& notes = c->getSequence().getNotes();
+            double first = -1, firstLen = -1, held = -1, heldEnd = -1;
+            for (auto* n : notes)
+            {
+                if (n->getNoteNumber() == 60) { first = n->getEditStartTime (*c).inSeconds(); firstLen = n->getEditEndTime (*c).inSeconds() - first; }
+                if (n->getNoteNumber() == 64) { held = n->getEditStartTime (*c).inSeconds(); heldEnd = n->getEditEndTime (*c).inSeconds(); }
+            }
+            // The yardstick is the audio: a click played at the same moment lands at 6.0 + lag.
+            const double expected = 6.0 + lag;
+            // The stand-in device delivers MIDI stamped at the start of its audio
+            // block (the engine's own MIDI recording shows the same), so here
+            // MIDI can only be checked to within one block. A real keyboard's
+            // driver timestamps are finer; that's checked by hand.
+            check (first <= expected + 1.0 / sr && (expected - first) * sr <= block, "Test 7: the note lands at " + juce::String (first, 4)
+                   + " seconds, within one audio block of where audio played at the same moment lands (" + juce::String (expected, 4) + ").");
+            // The stand-in device stamps MIDI per block, not per sample, so within a block here.
+            check (std::abs (firstLen - 0.5) * sr <= block, "Test 7: and lasts half a second, to within one audio block ("
+                   + juce::String (firstLen, 3) + ").");
+            check (std::abs (held - 9.5) * sr <= block && std::abs (heldEnd - 10.0) * sr <= block,
+                   "Test 7: the note still held at the end ends with the take, at " + juce::String (heldEnd, 2) + " seconds.");
+            bool pedal = false;
+            for (auto* e : c->getSequence().getControllerEvents())
+                if (e->getType() == 64 && e->getControllerValue() > 0) pedal = true;
+            check (pedal, "Test 7: the sustain pedal is in the clip.");
+        }
+
+        // Keep only the last 3 seconds: the pedal went down 5 seconds before
+        // the take starts, so the clip must start with it down.
+        auto k2 = rig.capture->keepLast (3, rig.takes());
+        tc.stop (false, true);
+        if (! k2.midiClips.isEmpty())
+        {
+            auto* c = k2.midiClips[0];
+            double pedalAt = -1;
+            for (auto* e : c->getSequence().getControllerEvents())
+                if (e->getType() == 64 && e->getControllerValue() > 0) pedalAt = e->getEditTime (*c).inSeconds();
+            check (std::abs (pedalAt - c->getPosition().getStart().inSeconds()) < 0.002,
+                   "Test 7: a take that starts mid-pedal starts with the pedal down, at " + juce::String (pedalAt, 2) + " seconds.");
+        }
+        else
+            check (false, "Test 7: keeping the last 3 seconds made a MIDI clip.");
     }
 
     say ("");

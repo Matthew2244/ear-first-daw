@@ -28,7 +28,8 @@ struct AppPropertyStorage : public PropertyStorage
 struct AppEngineBehaviour : public EngineBehaviour
 {
     explicit AppEngineBehaviour (bool device) : openDevice (device) {}
-    bool autoInitialiseDeviceManager() override    { return openDevice; }
+    // Never: the app checks the interface answers first, then opens it itself.
+    bool autoInitialiseDeviceManager() override    { return false; }
     bool openDevice;
 };
 
@@ -65,6 +66,13 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         for (auto& run : captureRoot.findChildFiles (juce::File::findDirectories, false))
             if (CaptureInfo::load (run)) lastOpenReport.leftoverCaptures.add (run);
             else run.deleteRecursively();
+        // An interface that has stopped answering would freeze the app before
+        // it could say a word (it happened with a StudioLive 64S, 6 November
+        // 2026). So try the saved one in the background first; if it doesn't
+        // answer in a few seconds, start on the system's own audio and say why.
+        if (auto stuck = savedInterfaceThatWontAnswer(); stuck.isNotEmpty())
+            startupProblem = stuck + " isn't answering, so Ear First is using other audio for now. "
+                             "Turn the interface off and on, then choose it again with Record from.";
         engine.getDeviceManager().initialise (1024, 2);
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
         capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
@@ -108,7 +116,119 @@ AppCore::~AppCore()
     song.reset();
 }
 
+namespace
+{
+// Opens a device and asks it a question on a thread of its own, waiting up to
+// `seconds`. A wedged driver can block that thread forever; it's left behind.
+bool answers (const juce::String& type, const juce::String& out, const juce::String& in, double seconds)
+{
+    auto done = std::make_shared<std::atomic<bool>> (false);
+    std::thread ([done, type, out, in]
+    {
+        juce::AudioDeviceManager scratch;
+        juce::OwnedArray<juce::AudioIODeviceType> types;
+        scratch.createAudioDeviceTypes (types);
+        for (auto* t : types)
+            if (type.isEmpty() || t->getTypeName() == type)
+            {
+                t->scanForDevices();
+                if (std::unique_ptr<juce::AudioIODevice> d { t->createDevice (out, in) })
+                    juce::ignoreUnused (d->getAvailableBufferSizes(), d->getAvailableSampleRates());
+                break;
+            }
+        *done = true;
+    }).detach();
+    for (int i = 0; i < (int) (seconds * 20) && ! *done; ++i)
+        juce::Thread::sleep (50);
+    return *done;
+}
+
+// Tries every device at once and returns the first in the list that answers,
+// so a stuck interface costs one short wait, not one per device.
+juce::String firstThatAnswers (const juce::String& type, const juce::StringArray& names, bool inputs,
+                               const juce::String& skip, double seconds)
+{
+    std::vector<std::shared_ptr<std::atomic<bool>>> done;
+    for (auto& n : names)
+    {
+        auto flag = std::make_shared<std::atomic<bool>> (n == skip);
+        done.push_back (flag);
+        if (n == skip) { *flag = false; continue; }
+        std::thread ([flag, type, n, inputs]
+        {
+            juce::AudioDeviceManager scratch;
+            juce::OwnedArray<juce::AudioIODeviceType> types;
+            scratch.createAudioDeviceTypes (types);
+            for (auto* t : types)
+                if (type.isEmpty() || t->getTypeName() == type)
+                {
+                    t->scanForDevices();
+                    if (std::unique_ptr<juce::AudioIODevice> d { inputs ? t->createDevice ({}, n) : t->createDevice (n, {}) })
+                        juce::ignoreUnused (d->getAvailableBufferSizes());
+                    break;
+                }
+            *flag = true;
+        }).detach();
+    }
+    for (int i = 0; i < (int) (seconds * 20); ++i)
+    {
+        juce::Thread::sleep (50);
+        for (size_t k = 0; k < done.size(); ++k)
+        {
+            if (! *done[k]) break;          // keep list order: wait for earlier ones
+            if (names[(int) k] != skip) return names[(int) k];
+        }
+    }
+    for (size_t k = 0; k < done.size(); ++k)
+        if (*done[k] && names[(int) k] != skip) return names[(int) k];
+    return {};
+}
+} // namespace
+
+juce::String AppCore::savedInterfaceThatWontAnswer()
+{
+    // What would be opened: the saved choice, or the system's defaults.
+    juce::AudioDeviceManager scratch;
+    juce::OwnedArray<juce::AudioIODeviceType> types;
+    scratch.createAudioDeviceTypes (types);
+    if (types.isEmpty()) return {};
+    auto* type = types[0];
+    type->scanForDevices();
+    auto outs = type->getDeviceNames (false), ins = type->getDeviceNames (true);
+
+    juce::String in, out;
+    if (auto xml = engine.getPropertyStorage().getXmlProperty (SettingID::audio_device_setup))
+    {
+        in = xml->getStringAttribute ("audioInputDeviceName");
+        out = xml->getStringAttribute ("audioOutputDeviceName");
+    }
+    if (in.isEmpty())  in  = ins[juce::jmax (0, type->getDefaultDeviceIndex (true))];
+    if (out.isEmpty()) out = outs[juce::jmax (0, type->getDefaultDeviceIndex (false))];
+
+    const bool outOk = out.isEmpty() || answers (type->getTypeName(), out, {}, 3.0);
+    const bool inOk  = in.isEmpty() || in == out ? outOk : answers (type->getTypeName(), {}, in, 3.0);
+    if (outOk && inOk) return {};
+
+    // Something that answers instead: the first output that does, and the
+    // first input that does (or none, rather than freeze).
+    juce::String newOut = outOk ? out : firstThatAnswers (type->getTypeName(), outs, false, out, 2.0);
+    juce::String newIn  = inOk  ? in  : firstThatAnswers (type->getTypeName(), ins, true, in, 2.0);
+
+    juce::XmlElement setup ("DEVICESETUP");
+    setup.setAttribute ("deviceType", type->getTypeName());
+    setup.setAttribute ("audioOutputDeviceName", newOut);
+    setup.setAttribute ("audioInputDeviceName", newIn);
+    engine.getPropertyStorage().setXmlProperty (SettingID::audio_device_setup, setup);
+    return ! outOk ? out : in;
+}
+
 juce::String AppCore::startupSentence() const
+{
+    if (startupProblem.isNotEmpty()) return startupProblem + (lastOpenReport.leftoverCaptures.isEmpty() ? juce::String() : " " + leftoverSentence());
+    return leftoverSentence();
+}
+
+juce::String AppCore::leftoverSentence() const
 {
     if (lastOpenReport.leftoverCaptures.isEmpty()) return {};
     double secs = 0;
@@ -425,13 +545,21 @@ void AppCore::registerCommands()
     }
     {
         Command c; c.id = "file.close-song"; c.name = "Close Song"; c.category = "File";
-        c.description = "Closes the song. If it has unsaved changes, save first.";
-        c.available = [this, needSong]
+        c.description = "Closes the song. If it has unsaved changes, asks whether to save first.";
+        c.available = needSong;
+        c.run = [this] (const CommandArgs&)
         {
-            if (song == nullptr) return needSong();
-            return song->hasUnsavedChanges() ? Availability::no (song->getName() + " has unsaved changes. Save first, with Command-S.") : Availability::yes();
+            if (song->hasUnsavedChanges())
+            {
+                if (onUnsavedClose)
+                {
+                    onUnsavedClose ([this] { speaker.say (closeSong()); });
+                    return CommandResult::done();
+                }
+                return CommandResult::failed (song->getName() + " has unsaved changes. Save first, with Command-S.");
+            }
+            return CommandResult::done (closeSong());
         };
-        c.run = [this] (const CommandArgs&) { return CommandResult::done (closeSong()); };
         add (c);
     }
 

@@ -39,6 +39,7 @@ public:
     Updater& updater()                  { return *updates; }
     // Said once the window is up: anything found from a run that didn't close cleanly.
     juce::String startupSentence() const;
+    juce::String leftoverSentence() const;
 
     // Songs.
     juce::String newSong (const juce::String& name);
@@ -46,6 +47,7 @@ public:
     juce::String closeSong();
     std::function<void()> onSongChanged;        // the window refreshes its lists
     std::function<void()> onOpenSongRequested;  // the window shows a folder chooser
+    std::function<void (std::function<void()>)> onUnsavedClose;   // ask save / don't save / cancel, then run it
 
     // Run a command the way a person asked for it: from a menu or the
     // palette, a command that needs settings shows its form first.
@@ -93,7 +95,9 @@ private:
     Session::OpenReport lastOpenReport;
     double lastAutosave = 0, lastUpdateCheck = 0;
     juce::String announcedVersion;
-    juce::String setAsideNote;   // said after a device switch kept the old capture
+    juce::String setAsideNote;
+    juce::String startupProblem;   // said at startup: an interface that wouldn't answer
+    juce::String savedInterfaceThatWontAnswer();   // said after a device switch kept the old capture
     bool wasPlaying = false;
 };
 

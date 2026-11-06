@@ -789,6 +789,7 @@ public:
         core = std::make_unique<AppCore> (output, o);
         window = std::make_unique<MainWindow> (*core, output);
         core->onOpenSongRequested = [this] { chooseSong(); };
+        core->onUnsavedClose = [this] (std::function<void()> closeIt) { askToSave (core->session()->getName(), "close it", std::move (closeIt)); };
         window->setVisible (true);
         window->content->tracks.grabKeyboardFocus();
         output.screenChanged();
@@ -815,10 +816,35 @@ public:
         if (core != nullptr)
             if (auto* s = core->session(); s != nullptr && s->hasUnsavedChanges())
             {
-                core->speech().say (s->getName() + " has unsaved changes. Save with Command-S, then quit.", Speech::Priority::urgent);
+                askToSave (s->getName(), "quit", [this] { quit(); });
                 return;
             }
         quit();
+    }
+
+    // "Save and quit", "Quit without saving", "Cancel". A native alert, which
+    // the screen reader reads as a dialog with its buttons. Escape cancels.
+    void askToSave (const juce::String& songName, const juce::String& verb, std::function<void()> then)
+    {
+        auto opts = juce::MessageBoxOptions()
+                        .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                        .withTitle (songName + " has unsaved changes")
+                        .withMessage ("Save " + songName + " before you " + verb + "?")
+                        .withButton ("Save and " + verb, 1)
+                        .withButton ("Don't save", 2)
+                        .withButton ("Cancel", 0);
+        juce::AlertWindow::showAsync (opts, [this, then] (int result)
+        {
+            if (core == nullptr || core->session() == nullptr) return;
+            if (result == 1)   // save
+            {
+                auto said = core->session()->save();
+                if (said != "Saved.") { core->speech().sayUrgent (said); return; }
+                then();
+            }
+            else if (result == 2)   // don't save
+                then();
+        });
     }
 
 private:

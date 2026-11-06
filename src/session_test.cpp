@@ -72,6 +72,8 @@ int main()
         check (s->hasUnsavedChanges(), "after adding tracks and a clip, it knows there are unsaved changes.");
         check (s->save() == "Saved." && ! s->hasUnsavedChanges(), "saving says Saved, and nothing is unsaved after.");
         check (! s->autosaveIfNeeded(), "with nothing changed, autosave writes nothing.");
+        edit.getTransport().setPosition (TimePosition::fromSeconds (12.0));
+        check (! s->hasUnsavedChanges(), "moving the playhead doesn't count as an unsaved change.");
     }
     check (! folder.getChildFile (".open").exists(), "closing cleanly removes the open marker.");
 
@@ -150,8 +152,13 @@ int main()
     say ("");
     say ("Open twice");
     {
-        // Pretend a live copy of the app on this computer has it open (process 1 is always running).
-        folder.getChildFile (".open").replaceWithText ("1\n" + juce::SystemStats::getComputerName() + "\n");
+        // Pretend a live copy of the app on this computer has it open (a process that is always running).
+       #if JUCE_WINDOWS
+        const juce::String alwaysRunning = "4";   // the Windows System process
+       #else
+        const juce::String alwaysRunning = "1";   // launchd
+       #endif
+        folder.getChildFile (".open").replaceWithText (alwaysRunning + "\n" + juce::SystemStats::getComputerName() + "\n");
         Session::OpenReport report;
         auto s = Session::open (engine, folder, report, error);
         check (s == nullptr && error.contains ("already open"), "a song open in another copy of the app isn't opened twice: \"" + error + "\"");

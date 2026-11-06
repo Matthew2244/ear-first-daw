@@ -19,6 +19,8 @@ EngineCapture::EngineCapture (Engine& e, juce::File folder)
     engineCallback = (juce::AudioIODeviceCallback*) &dm;
     dm.deviceManager.removeAudioCallback (engineCallback);
     dm.deviceManager.addAudioCallback (this);
+    // A keyboard plugged in later is picked up once the engine has rebuilt its inputs.
+    dm.addChangeListener (this);
     // Swapping stops and restarts the engine's callback, and the engine
     // finishes a restart on the message thread. Finish it now, so the engine
     // is never left paused waiting for it.
@@ -27,6 +29,10 @@ EngineCapture::EngineCapture (Engine& e, juce::File folder)
 
 EngineCapture::~EngineCapture()
 {
+    stopTimer();
+    engine.getDeviceManager().removeChangeListener (this);
+    detachMidiTaps();
+    midi.reset();
     auto& jdm = engine.getDeviceManager().deviceManager;
     jdm.removeAudioCallback (this);
     jdm.addAudioCallback (engineCallback);
@@ -35,8 +41,23 @@ EngineCapture::~EngineCapture()
         recorder->stop();
 }
 
+void EngineCapture::detachMidiTaps()
+{
+    // When a device is unplugged the engine rebuilds its inputs and deletes
+    // the old ones, our listeners with them. Only unhook from inputs that
+    // still exist (unplugging the test keyboard crashed it, 6 November 2026).
+    juce::Array<InputDeviceInstance*> live;
+    if (auto* ctx = context.load())
+        live = ctx->getAllInputs();
+    for (auto& [instance, tap] : midiTaps)
+        if (live.contains (instance))
+            instance->removeConsumer (tap.get());
+    midiTaps.clear();
+}
+
 void EngineCapture::attachEdit (Edit* e)
 {
+    detachMidiTaps();
     edit = e;
     EditPlaybackContext* ctx = nullptr;
     if (e != nullptr)
@@ -46,8 +67,51 @@ void EngineCapture::attachEdit (Edit* e)
     }
     // The callback reads this under the device's lock, so once this returns
     // no block is still using the old one.
-    const juce::ScopedLock sl (engine.getDeviceManager().deviceManager.getAudioCallbackLock());
-    context.store (ctx);
+    {
+        const juce::ScopedLock sl (engine.getDeviceManager().deviceManager.getAudioCallbackLock());
+        context.store (ctx);
+    }
+
+    attachMidiTaps();
+}
+
+void EngineCapture::attachMidiTaps()
+{
+    // Listen to every MIDI input of this song, armed or not. Called again when
+    // devices change, since the engine rebuilds its inputs then.
+    detachMidiTaps();
+    auto* ctx = context.load();
+    if (ctx == nullptr) return;
+    for (auto& mi : engine.getDeviceManager().getMidiInDevices())
+        if (! mi->isEnabled()) mi->setEnabled (true);
+    for (auto* input : ctx->getAllInputs())
+        if (input->owner.isMidi())
+        {
+            // The engine's "All MIDI Ins" merges every device; listening to it
+            // too would keep every note twice (heard 6 November 2026).
+            if (auto* v = dynamic_cast<VirtualMidiInputDevice*> (&input->owner); v != nullptr && v->useAllInputs)
+                continue;
+            auto tap = std::make_unique<MidiTap> (*this, input->owner.getName());
+            input->addConsumer (tap.get());
+            midiTaps.push_back ({ input, std::move (tap) });
+        }
+}
+
+void EngineCapture::midiArrived (const juce::String& device, const juce::MidiMessage& m)
+{
+    auto* mc = midi.get();
+    if (mc == nullptr) return;
+    // Read the block clock consistently (it changes once a block).
+    int64_t pos; double stream; uint32_t v1, v2;
+    do
+    {
+        v1 = clockVersion.load (std::memory_order_acquire);
+        pos = clockSample.load (std::memory_order_relaxed);
+        stream = clockStreamTime.load (std::memory_order_relaxed);
+        v2 = clockVersion.load (std::memory_order_acquire);
+    } while (v1 != v2 || (v1 & 1u) != 0);
+    const auto sample = pos + (int64_t) std::llround ((m.getTimeStamp() - stream) * sampleRate);
+    mc->add (device, sample, m);
 }
 
 void EngineCapture::audioDeviceStopped()
@@ -76,7 +140,8 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         // Never lose audio on a switch: keep it on disk as recovered audio.
         const auto had = (double) recorder->getPushedSamples() / sampleRate;
         auto folder = recorder->getStore().getFolder();
-        if (had > 0.5) recorder->keepFilesOnClose();
+        if (had > 0.5) { recorder->keepFilesOnClose(); if (midi) midi->keepFilesOnClose(); }
+        midi.reset();
         recorder->stop();
         recorder.reset();
         if (had > 0.5 && onCaptureSetAside) onCaptureSetAside (folder, had);
@@ -95,11 +160,19 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     o.maxBlockSize = maxBlock = std::max (4096, device->getCurrentBufferSizeSamples());
     chunk.assign ((size_t) numInputs, nullptr);
     recorder = std::make_unique<CaptureRecorder> (o);
+    midi = std::make_unique<MidiCapture> (o.folder.getChildFile ("midi"), rate);
 }
 
 void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, int numIn, float* const* out, int numOut,
                                                       int n, const juce::AudioIODeviceCallbackContext& deviceContext)
 {
+    // The engine hasn't run this block yet: its clock reads the block's start.
+    // MIDI timestamps are mapped onto the capture clock through this pair.
+    clockVersion.fetch_add (1, std::memory_order_acq_rel);
+    clockSample.store (blockStart.load (std::memory_order_relaxed), std::memory_order_relaxed);
+    clockStreamTime.store (engine.getDeviceManager().getCurrentStreamTime(), std::memory_order_relaxed);
+    clockVersion.fetch_add (1, std::memory_order_acq_rel);
+
     // Inputs first, before the engine can touch the buffers.
     const bool captured = capture (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
@@ -171,6 +244,55 @@ juce::String whereText (Edit& edit, TimePosition t)
 }
 } // namespace
 
+void EngineCapture::placeMidi (Kept& k, TimePosition at, TimeDuration length, int64_t captureStart, const juce::String& takeName)
+{
+    if (midi == nullptr) return;
+    midi->flushNow();
+    const auto captureEnd = captureStart + toSamples (TimePosition() + length, sampleRate);
+    for (auto& device : midi->devices())
+    {
+        auto events = midi->eventsIn (device, captureStart, captureEnd);
+        bool anyNotes = false;
+        for (auto& e : events) anyNotes |= e.message.isNoteOn();
+        if (events.empty() || ! anyNotes) continue;
+
+        // Times on the song's timeline, in seconds, the way the engine imports them.
+        juce::MidiMessageSequence seq;
+        for (auto& cc : midi->controllerStateAt (device, captureStart))   // the pedal where it was
+            seq.addEvent (juce::MidiMessage (cc, at.inSeconds()));
+        for (auto& e : events)
+            seq.addEvent (juce::MidiMessage (e.message, at.inSeconds() + (double) (e.sample - captureStart) / sampleRate));
+        seq.updateMatchedPairs();
+        // A note still held when the take ends gets its end there.
+        const double endSecs = at.inSeconds() + length.inSeconds();
+        juce::Array<juce::MidiMessage> ends;
+        for (int i = 0; i < seq.getNumEvents(); ++i)
+            if (auto* ev = seq.getEventPointer (i); ev->message.isNoteOn() && ev->noteOffObject == nullptr)
+                ends.add (juce::MidiMessage::noteOff (ev->message.getChannel(), ev->message.getNoteNumber(), (juce::uint8) 0)
+                              .withTimeStamp (endSecs));
+        for (auto& e : ends) seq.addEvent (e);
+        seq.updateMatchedPairs();
+
+        // The device's own track, made the first time it plays.
+        AudioTrack* track = nullptr;
+        for (auto* t : getAudioTracks (*edit))
+            if (t->getName() == device) track = t;
+        if (track == nullptr)
+        {
+            auto all = getAudioTracks (*edit);
+            auto t = edit->insertNewAudioTrack (TrackInsertPoint (nullptr, all.isEmpty() ? nullptr : all.getLast()), nullptr);
+            if (t == nullptr) continue;
+            t->setName (device);
+            track = t.get();
+        }
+        if (auto clip = track->insertMIDIClip (device + " " + takeName, TimeRange (at, length), nullptr))
+        {
+            clip->getSequence().importMidiSequence (seq, edit, at, nullptr);
+            k.midiClips.add (clip.get());
+        }
+    }
+}
+
 EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& takesFolder)
 {
     Kept k;
@@ -211,6 +333,7 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
                                                        ClipPosition { { at, length }, offset }, false))
                 k.clips.add (clip.get());
         k.timelineStart = at;
+        placeMidi (k, at, length, k.take.start + toSamples (TimePosition() + offset, sampleRate), name);
     };
 
     // Was the song looping? Passes are steady playing stretches (the single
@@ -262,11 +385,13 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     }
 
     auto took = (double) (k.take.end - k.take.start) / sampleRate;
+    const auto midiWords = k.midiClips.isEmpty() ? juce::String()
+                         : " and " + juce::String (k.midiClips.size()) + (k.midiClips.size() == 1 ? " MIDI device" : " MIDI devices");
     if (looped)
     {
         const int others = (int) k.passes.size() - 1;
         k.sentence = "Kept " + juce::String ((int) k.passes.size()) + " passes of the loop on "
-                     + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs")
+                     + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords
                      + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + whereText (*edit, k.timelineStart)
                      + (others == 1 ? ". The other pass is saved" : ". The other " + juce::String (others) + " are saved")
                      + " with the take for comping.";
@@ -274,7 +399,7 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
         return k;
     }
     k.sentence = "Kept " + secondsText (took) + " on " + juce::String (k.take.files.size())
-                 + (k.take.files.size() == 1 ? " input" : " inputs") + ", "
+                 + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords + ", "
                  + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
                  + whereText (*edit, k.timelineStart) + ".";
     if (k.secondsBeforeSongStart >= 0.5)

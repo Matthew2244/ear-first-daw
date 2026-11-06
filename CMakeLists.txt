@@ -65,7 +65,7 @@ target_link_libraries(capture-live PRIVATE
 juce_add_console_app(capture-engine-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(capture-engine-test)
 target_compile_features(capture-engine-test PRIVATE cxx_std_20)
-target_sources(capture-engine-test PRIVATE src/capture_engine_test.cpp src/capture/EngineCapture.cpp src/capture/CaptureRecorder.cpp)
+target_sources(capture-engine-test PRIVATE src/capture_engine_test.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp)
 target_include_directories(capture-engine-test PRIVATE src)
 target_compile_definitions(capture-engine-test PRIVATE
     JUCE_PLUGINHOST_AU=1
@@ -126,7 +126,7 @@ endif()
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
     src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp
-    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/CaptureRecorder.cpp)
+    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp)
 if (APPLE)
     list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)
 endif()
@@ -206,3 +206,10 @@ if (APPLE)
         COMMENT "Embedding Sparkle and signing Ear First"
         VERBATIM)
 endif()
+
+# test-keyboard: a pretend MIDI keyboard for testing MIDI capture by hand or in scripts.
+juce_add_console_app(test-keyboard NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+target_compile_features(test-keyboard PRIVATE cxx_std_20)
+target_sources(test-keyboard PRIVATE src/tools/test_keyboard.cpp)
+target_compile_definitions(test-keyboard PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(test-keyboard PRIVATE juce::juce_audio_devices juce::juce_recommended_config_flags)

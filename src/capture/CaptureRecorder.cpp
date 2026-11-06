@@ -557,7 +557,7 @@ double CaptureRecorder::hoursOfRoomLeft() const
 
 static juce::String describeDuration (double seconds)
 {
-    if (seconds < 90)   return juce::String (juce::roundToInt (seconds)) + " seconds";
+    if (seconds < 90)   return juce::String (juce::roundToInt (seconds)) + (juce::roundToInt (seconds) == 1 ? " second" : " seconds");
     if (seconds < 5400) return juce::String (juce::roundToInt (seconds / 60)) + " minutes";
     const double hours = seconds / 3600;
     if (hours >= 10)   // "about 4749 hours", not "4749.0"
