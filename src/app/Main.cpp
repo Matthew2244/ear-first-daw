@@ -335,7 +335,7 @@ private:
 // A form for any command's settings, built from its list of settings: a
 // popup list for choices, a text box for numbers and names, a checkbox for
 // yes or no. Every control is labelled; Return runs, Escape cancels.
-class SettingsForm : public juce::Component
+class SettingsForm : public juce::Component, private juce::KeyListener
 {
 public:
     SettingsForm (AppCore& c, const Command& cmd, std::function<void()> closeIt)
@@ -361,6 +361,13 @@ public:
                 auto options = a.choicesNow();
                 for (int i = 0; i < options.size(); ++i) box->addItem (options[i], i + 1);
                 box->setSelectedItemIndex (std::max (0, options.indexOf (value.toString())), juce::dontSendNotification);
+                // In a form, Return means the main button. A popup would
+                // otherwise take it to open its list; Space still opens it.
+                box->addKeyListener (this);
+                // VoiceOver doesn't say a popup's new choice as you arrow
+                // through it (heard 6 November 2026), so the app does.
+                auto* raw = box.get();
+                box->onChange = [this, raw] { core.speech().say (raw->getText(), Speech::Priority::quiet, "form-choice"); };
                 f.control = std::move (box);
             }
             else if (a.type == ArgSpec::Type::boolean)
@@ -395,6 +402,23 @@ public:
     {
         juce::Component::SafePointer<SettingsForm> self (this);
         juce::MessageManager::callAsync ([self] { if (self != nullptr && self->isShowing() && ! self->fields.empty()) self->fields[0].control->grabKeyboardFocus(); });
+        // Once VoiceOver has finished with the window, say where you are and what to do.
+        juce::Timer::callAfterDelay (1600, [self]
+        {
+            if (self == nullptr || ! self->isShowing() || self->fields.empty()) return;
+            self->core.speech().say (self->firstFieldSentence(), Speech::Priority::quiet, "form");
+        });
+    }
+
+    juce::String firstFieldSentence() const
+    {
+        auto& f = fields[0];
+        juce::String value;
+        if (auto* box = dynamic_cast<juce::ComboBox*> (f.control.get())) value = box->getText();
+        else if (auto* e = dynamic_cast<juce::TextEditor*> (f.control.get())) value = e->getText();
+        const bool isChoice = dynamic_cast<juce::ComboBox*> (f.control.get()) != nullptr;
+        return f.label->getText() + ", " + (value.isNotEmpty() ? value : juce::String ("empty")) + ". "
+               + (isChoice ? "Up and Down to choose, " : "") + "Return to " + ok.getButtonText() + ", Escape to cancel.";
     }
 
     void resized() override
@@ -419,6 +443,8 @@ public:
         if (k == juce::KeyPress::escapeKey) { if (close) close(); return true; }
         return false;
     }
+
+    bool keyPressed (const juce::KeyPress& k, juce::Component*) override   { return keyPressed (k); }
 
     CommandArgs values() const
     {

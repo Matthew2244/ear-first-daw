@@ -552,7 +552,7 @@ void AppCore::registerCommands()
     }
     {
         Command c; c.id = "capture.keep-recovered"; c.name = "Keep recovered audio"; c.category = "Capture";
-        c.description = "Keeps audio that was captured before the app closed unexpectedly.";
+        c.description = "Keeps audio that was captured but never kept: from before the app closed unexpectedly, or before you switched interfaces.";
         c.available = [this] { return lastOpenReport.leftoverCaptures.isEmpty() ? Availability::no ("There's no recovered audio waiting.") : Availability::yes(); };
         c.run = [this] (const CommandArgs&)
         {
@@ -579,7 +579,7 @@ void AppCore::registerCommands()
     }
     {
         Command c; c.id = "capture.discard-recovered"; c.name = "Throw away recovered audio"; c.category = "Capture";
-        c.description = "Throws away audio that was captured before the app closed unexpectedly.";
+        c.description = "Throws away audio that was captured but never kept: from before the app closed unexpectedly, or before you switched interfaces.";
         c.available = [this] { return lastOpenReport.leftoverCaptures.isEmpty() ? Availability::no ("There's no recovered audio waiting.") : Availability::yes(); };
         c.run = [this] (const CommandArgs&)
         {
