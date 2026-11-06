@@ -40,6 +40,8 @@ jobs:
 
       - name: Run the tests
         shell: bash
+        env:
+          EARFIRST_TEST_SPEED: "3"   # shared machines have slow disks; real time is tested at 1x elsewhere
         run: |
           set -o pipefail
           ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"

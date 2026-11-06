@@ -173,7 +173,12 @@ void test2 (const juce::File& root)
     say ("Using " + juce::String (rec.getWriterThreadCount()) + " writer threads and a "
          + mb ((double) rec.getBufferBytes()) + " buffer.");
 
-    auto fr = feed (rec, 44, 180, 256, 10);
+    // Ten times real speed on a fast disk. Shared build machines have slow
+    // disks, so EARFIRST_TEST_SPEED lowers it there; real time is the real
+    // requirement, and the scale test checks that at 1x.
+    const double speed = juce::jmax (1.0, juce::SystemStats::getEnvironmentVariable ("EARFIRST_TEST_SPEED", "10").getDoubleValue());
+    say ("Feeding at " + juce::String (speed, 0) + " times real speed.");
+    auto fr = feed (rec, 44, 180, 256, speed);
     check (rec.getDroppedSamples() == 0, "nothing dropped (" + juce::String (rec.getDroppedSamples()) + " samples).");
     say ("The slowest hand-off from the audio thread took " + juce::String (fr.maxPushMicros, 0)
          + " microseconds. A 256-sample block at 48 kHz allows 5333.");
@@ -186,7 +191,8 @@ void test2 (const juce::File& root)
     int64_t bad = 0; bool lengths = r.files.size() == 44, stamps = true;
     for (int ch = 0; ch < r.files.size(); ++ch)
     {
-        auto c = compareTake (r.files[ch], ch, r.start, r.end);
+        // Any dropped block must be silence on every input; everything else exact.
+        auto c = compareTake (r.files[ch], ch, r.start, r.end, &fr.accepted, 256);
         bad += c.mismatches; lengths &= c.lengthOk; stamps &= c.stampOk;
     }
     check (lengths && stamps, "all 44 takes are the right length and stamped at the same position.");
