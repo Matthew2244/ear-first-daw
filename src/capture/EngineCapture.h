@@ -53,6 +53,9 @@ public:
     CaptureRecorder* getRecorder()          { return recorder.get(); }
     MidiCapture* getMidi()                  { return midi.get(); }
 
+    // Every MIDI message, as it arrives (on a MIDI thread), for controls.
+    std::function<void (const juce::String& device, const juce::MidiMessage&)> onMidi;
+
     // How to say a place on the timeline; the app sets it from your speech choices.
     std::function<juce::String (const tracktion::Edit&, tracktion::TimePosition)> describePlace;
 

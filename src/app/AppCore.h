@@ -6,6 +6,7 @@
 #include <JuceHeader.h>
 #include "commands/Commands.h"
 #include "commands/Keymap.h"
+#include "commands/MidiControls.h"
 #include "speech/Speech.h"
 #include "session/Session.h"
 #include "capture/EngineCapture.h"
@@ -41,6 +42,9 @@ public:
 
     CommandList& commands()             { return commandList; }
     Keymap& keymap()                    { return keys; }
+    MidiControls& midiControls()        { return controls; }
+    // A MIDI message from any device: learning a control, or running one. Message thread.
+    void handleMidiControl (const juce::String& device, const juce::MidiMessage&);
     Speech& speech()                    { return speaker; }
     tracktion::Engine& getEngine()      { return engine; }
     Session* session()                  { return song.get(); }
@@ -107,6 +111,10 @@ private:
     Options options;
     CommandList commandList { *this };
     Keymap keys { commandList };
+    MidiControls controls { commandList };
+    juce::String learningCommand;    // waiting for a control to press for this command
+    double learningSince = 0;
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     Speech speaker;
     std::unique_ptr<Session> song;
     std::unique_ptr<EngineCapture> capture;
@@ -115,6 +123,7 @@ private:
     double lastAutosave = 0, lastUpdateCheck = 0;
     juce::String announcedVersion;
     juce::String setAsideNote;
+    juce::String preferredInput, preferredOutput;   // the interface you chose; tried first at every launch
     juce::String startupProblem;   // said at startup: an interface that wouldn't answer
     juce::String savedInterfaceThatWontAnswer();   // said after a device switch kept the old capture
     bool wasPlaying = false;

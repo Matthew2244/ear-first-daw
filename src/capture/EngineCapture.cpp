@@ -113,6 +113,7 @@ void EngineCapture::midiArrived (const juce::String& device, const juce::MidiMes
     } while (v1 != v2 || (v1 & 1u) != 0);
     const auto sample = pos + (int64_t) std::llround ((m.getTimeStamp() - stream) * sampleRate);
     mc->add (device, sample, m);
+    if (onMidi) onMidi (device, m);
 }
 
 void EngineCapture::audioDeviceStopped()
@@ -133,7 +134,7 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const double rate = device->getCurrentSampleRate();
 
     // Same device, same inputs: carry on with the capture we have.
-    if (recorder != nullptr && rate == sampleRate && newNames == inputNames)
+    if ((recorder != nullptr || midi != nullptr) && rate == sampleRate && newNames == inputNames)
         return;
 
     if (recorder != nullptr)
@@ -147,17 +148,24 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         recorder.reset();
         if (had > 0.5 && onCaptureSetAside) onCaptureSetAside (folder, had);
     }
+    midi.reset();
     blockStart = 0;
     sampleRate = rate;
     numInputs = newNames.size();
     inputNames = newNames;
-    if (numInputs == 0) return;
+    deviceBlock = device->getCurrentBufferSizeSamples();
+    const auto runFolder = captureFolder.getChildFile (juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"));
+    if (numInputs == 0)
+    {
+        // No audio inputs: MIDI is still kept, on the device's clock.
+        midi = std::make_unique<MidiCapture> (runFolder.getChildFile ("midi"), rate);
+        return;
+    }
 
     CaptureRecorder::Options o;
-    o.folder = captureFolder.getChildFile (juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"));
+    o.folder = runFolder;
     o.sampleRate = rate;
     o.inputNames = inputNames;
-    deviceBlock = device->getCurrentBufferSizeSamples();
     o.maxBlockSize = maxBlock = std::max (4096, device->getCurrentBufferSizeSamples());
     chunk.assign ((size_t) numInputs, nullptr);
     recorder = std::make_unique<CaptureRecorder> (o);
@@ -175,9 +183,11 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     clockVersion.fetch_add (1, std::memory_order_acq_rel);
 
     // Inputs first, before the engine can touch the buffers.
-    const bool captured = capture (in, numIn, n);
+    capture (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
-    if (captured)
+    // The clock runs whenever the device does, inputs or not, so MIDI is
+    // captured and placed even with no audio inputs open.
+    if (sampleRate > 0)
         noteTimeline (n);
 }
 
@@ -297,19 +307,29 @@ void EngineCapture::placeMidi (Kept& k, TimePosition at, TimeDuration length, in
 EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& takesFolder)
 {
     Kept k;
-    if (recorder == nullptr || edit == nullptr)
+    if ((recorder == nullptr && midi == nullptr) || edit == nullptr)
     {
-        k.take.error = recorder == nullptr ? "Nothing is being captured. The audio device has no inputs open."
-                                           : "There's no song open to put the take in.";
+        k.take.error = edit == nullptr ? "There's no song open to put the take in."
+                                       : "Nothing is being captured. No audio interface is open.";
         k.sentence = k.take.error;
         return k;
     }
 
-    juce::Array<int> all;
-    for (int i = 0; i < numInputs; ++i) all.add (i);
     auto name = "Take " + juce::String (++takeNumber);
-    k.take = recorder->keepLast (seconds, all, takesFolder, name);
-    if (! k.take.ok()) { k.sentence = k.take.error; return k; }
+    if (recorder != nullptr)
+    {
+        juce::Array<int> all;
+        for (int i = 0; i < numInputs; ++i) all.add (i);
+        k.take = recorder->keepLast (seconds, all, takesFolder, name);
+        if (! k.take.ok()) { k.sentence = k.take.error; return k; }
+    }
+    else
+    {
+        // MIDI only: the same stretch of time on the device's clock.
+        k.take.end = blockStart.load();
+        k.take.start = std::max<int64_t> (0, k.take.end - (int64_t) std::llround (seconds * sampleRate));
+        if (k.take.end <= k.take.start) { k.take.error = "There's nothing in that stretch of time."; k.sentence = k.take.error; return k; }
+    }
 
     const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
     ensureContentTracks (*edit, numInputs);
@@ -386,6 +406,22 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     }
 
     auto took = (double) (k.take.end - k.take.start) / sampleRate;
+    if (k.take.files.isEmpty())
+    {
+        // MIDI only.
+        if (k.midiClips.isEmpty())
+        {
+            k.take.error = "Nothing was played on a MIDI device in the last " + secondsText (took) + ".";
+            k.sentence = k.take.error;
+            return k;
+        }
+        k.sentence = "Kept " + secondsText (took) + " of MIDI from " + juce::String (k.midiClips.size())
+                     + (k.midiClips.size() == 1 ? " device, " : " devices, ")
+                     + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
+                     + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart)) + ".";
+        k.brief = "Kept " + secondsText (took) + " of MIDI.";
+        return k;
+    }
     const auto midiWords = k.midiClips.isEmpty() ? juce::String()
                          : " and " + juce::String (k.midiClips.size()) + (k.midiClips.size() == 1 ? " MIDI device" : " MIDI devices");
     if (looped)

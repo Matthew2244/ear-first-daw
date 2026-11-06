@@ -125,7 +125,7 @@ endif()
 # The app, and its self-test (the same window code, never shown).
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
-    src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
+    src/commands/Commands.cpp src/commands/Keymap.cpp src/commands/MidiControls.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
     src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp)
 if (APPLE)
     list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)

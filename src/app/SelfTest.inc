@@ -208,6 +208,42 @@ int runSelfTest()
     }
 
     stSay ("");
+    stSay ("MIDI controls");
+    {
+        CommandArgs a; a.set ("command", "Keep");
+        core->commands().run ("controls.learn", a);
+        stCheck (last().startsWith ("Press the pedal, pad, key or button you want for Keep."), "Assign a MIDI control asks for the control: \"" + last() + "\"");
+        core->handleMidiControl ("Test Footswitch", juce::MidiMessage::controllerEvent (1, 85, 0));
+        stCheck (last().startsWith ("Press the pedal"), "a footswitch coming up doesn't count; it keeps waiting.");
+        core->handleMidiControl ("Test Footswitch", juce::MidiMessage::controllerEvent (1, 85, 127));
+        stCheck (last() == "Controller 85 on channel 1 from Test Footswitch now runs Keep.", "pressing it assigns it: \"" + last() + "\"");
+        const auto before = out.log.size();
+        core->handleMidiControl ("Test Footswitch", juce::MidiMessage::controllerEvent (1, 85, 127));
+        stCheck (out.log.size() == before, "holding it down doesn't run it again.");
+        core->handleMidiControl ("Test Footswitch", juce::MidiMessage::controllerEvent (1, 85, 0));
+        core->handleMidiControl ("Test Footswitch", juce::MidiMessage::controllerEvent (1, 85, 127));
+        stCheck (last().startsWith ("Nothing is being captured"), "release and press again, and it runs Keep: \"" + last() + "\"");
+        core->handleMidiControl ("Other Keyboard", juce::MidiMessage::controllerEvent (1, 85, 127));
+        stCheck (out.log.size() == before + 1, "the same controller on a different device does nothing.");
+
+        a.set ("command", "Play or stop");
+        core->commands().run ("controls.learn", a);
+        core->handleMidiControl ("Test Keyboard", juce::MidiMessage::controllerEvent (1, 64, 127));
+        stCheck (last().contains ("sustain pedal") && last().contains ("also hold notes"), "learning the sustain pedal warns that it still holds notes: \"" + last() + "\"");
+        core->handleMidiControl ("Test Keyboard", juce::MidiMessage::controllerEvent (1, 64, 0));
+
+        core->commands().run ("controls.list");
+        stCheck (last().startsWith ("2 MIDI controls:") && last().contains ("runs Keep") && last().contains ("runs Play or stop"), "MIDI controls lists both: \"" + last() + "\"");
+        a.set ("command", "Where am I");
+        core->commands().run ("controls.learn", a);
+        press (stKey (juce::KeyPress::escapeKey));
+        stCheck (last() == "Cancelled. Nothing was assigned.", "Escape cancels learning.");
+        CommandArgs r; r.set ("control", core->midiControls().all()[0].describe() + ", Keep");
+        core->commands().run ("controls.remove", r);
+        stCheck (core->midiControls().all().size() == 1 && last() == "Removed.", "removing one leaves the other.");
+    }
+
+    stSay ("");
     stSay ("Speech history");
     const auto lastSaid = last();
     press (stKey ('r', cmd | shift));

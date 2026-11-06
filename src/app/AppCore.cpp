@@ -80,6 +80,11 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         engine.getDeviceManager().initialise (1024, 2);
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
         capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
+        capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
+        {
+            if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
+            juce::MessageManager::callAsync ([this, flag, device, m] { if (*flag) handleMidiControl (device, m); });
+        };
         capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
         {
             lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
@@ -105,7 +110,8 @@ AppCore::AppCore (SpeechOutput& out, Options o)
 
     juce::StringArray moved;
     if (auto f = keymapFile(); options.saveSettings && f.existsAsFile())
-        if (auto r = keys.loadUserChanges (juce::JSON::parse (f), moved); r.failed())
+        if (auto parsed = juce::JSON::parse (f); (controls.fromVar (parsed["midiControls"]), true))
+        if (auto r = keys.loadUserChanges (parsed, moved); r.failed())
             say (r.getErrorMessage(), "Errors", {}, Speech::Priority::urgent);
     for (auto& m : moved) say (m, "Startup");
     if (! moved.isEmpty()) saveKeymap();
@@ -115,6 +121,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
 
 AppCore::~AppCore()
 {
+    *alive = false;
     stopTimer();
     if (capture != nullptr) capture->attachEdit (nullptr);
     capture.reset();
@@ -207,12 +214,31 @@ juce::String AppCore::savedInterfaceThatWontAnswer()
         in = xml->getStringAttribute ("audioInputDeviceName");
         out = xml->getStringAttribute ("audioOutputDeviceName");
     }
+    // The interface you chose wins over whatever the last session fell back
+    // to, so after a hiccup it comes back by itself.
+    {
+        auto app = juce::JSON::parse (appDataFolder().getChildFile ("App.json"));
+        auto prefIn = app.getProperty ("preferredInput", {}).toString(), prefOut = app.getProperty ("preferredOutput", {}).toString();
+        if (prefIn.isNotEmpty() && ins.contains (prefIn)) in = prefIn;
+        if (prefOut.isNotEmpty() && outs.contains (prefOut)) out = prefOut;
+    }
     if (in.isEmpty())  in  = ins[juce::jmax (0, type->getDefaultDeviceIndex (true))];
     if (out.isEmpty()) out = outs[juce::jmax (0, type->getDefaultDeviceIndex (false))];
 
     const bool outOk = out.isEmpty() || answers (type->getTypeName(), out, {}, 3.0);
     const bool inOk  = in.isEmpty() || in == out ? outOk : answers (type->getTypeName(), {}, in, 3.0);
-    if (outOk && inOk) return {};
+    if (outOk && inOk)
+    {
+        // Open what was asked for, even if the last session had fallen back.
+        auto xml = engine.getPropertyStorage().getXmlProperty (SettingID::audio_device_setup);
+        juce::XmlElement setup ("DEVICESETUP");
+        if (xml != nullptr) setup = *xml;
+        setup.setAttribute ("deviceType", type->getTypeName());
+        setup.setAttribute ("audioOutputDeviceName", out);
+        setup.setAttribute ("audioInputDeviceName", in);
+        engine.getPropertyStorage().setXmlProperty (SettingID::audio_device_setup, setup);
+        return {};
+    }
 
     // Something that answers instead: the first output that does, and the
     // first input that does (or none, rather than freeze).
@@ -262,6 +288,8 @@ void AppCore::saveAppSettings()
     o->setProperty ("waitForGaps", speaker.settings.waitForGaps);
     o->setProperty ("announcedVersion", announcedVersion);
     o->setProperty ("speech", speechPrefs.toVar());
+    o->setProperty ("preferredInput", preferredInput);
+    o->setProperty ("preferredOutput", preferredOutput);
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
     f.replaceWithText (juce::JSON::toString (juce::var (o)));
@@ -275,6 +303,8 @@ void AppCore::loadAppSettings()
     speaker.settings.waitForGaps = (bool) v.getProperty ("waitForGaps", true);
     announcedVersion = v.getProperty ("announcedVersion", {}).toString();
     speechPrefs.fromVar (v.getProperty ("speech", {}));
+    preferredInput = v.getProperty ("preferredInput", {}).toString();
+    preferredOutput = v.getProperty ("preferredOutput", {}).toString();
 }
 
 void AppCore::saveKeymap()
@@ -282,7 +312,9 @@ void AppCore::saveKeymap()
     if (! options.saveSettings) return;
     auto f = keymapFile();
     f.getParentDirectory().createDirectory();
-    f.replaceWithText (juce::JSON::toString (keys.userChangesToJson()));
+    auto v = keys.userChangesToJson();
+    if (auto* o = v.getDynamicObject()) o->setProperty ("midiControls", controls.toVar());
+    f.replaceWithText (juce::JSON::toString (v));
 }
 
 void AppCore::speak (const Message& m)
@@ -341,6 +373,11 @@ void AppCore::timerCallback()
     const bool playing = song != nullptr && song->getEdit().getTransport().isPlaying();
     if (playing != wasPlaying) { speaker.setPlaying (playing); wasPlaying = playing; }
     speaker.tick (now);
+    if (learningCommand.isNotEmpty() && now - learningSince > 20.0)
+    {
+        learningCommand.clear();
+        say ("Nothing was pressed, so nothing was assigned.", "Help");
+    }
 
     // A quiet look for updates a minute after launch, then every four hours.
     if (options.openAudioDevice && now - lastUpdateCheck > (lastUpdateCheck == 0 ? 60.0 : 4 * 3600.0))
@@ -356,6 +393,30 @@ void AppCore::timerCallback()
         lastAutosave = now;
         song->autosaveIfNeeded();
     }
+}
+
+//==============================================================================
+void AppCore::handleMidiControl (const juce::String& device, const juce::MidiMessage& m)
+{
+    if (learningCommand.isNotEmpty())
+    {
+        auto control = MidiControls::controlFor (device, m);
+        if (! control) { controls.remember (device, m); return; }   // a release or a small move: keep waiting
+        control->commandId = learningCommand;
+        learningCommand.clear();
+        controls.add (*control);
+        controls.remember (device, m);
+        saveKeymap();
+        auto* c = commandList.find (control->commandId);
+        auto name = c ? c->name : control->commandId;
+        juce::String s = control->describe() + " now runs " + name + ".";
+        if (control->type == MidiControl::Type::controller && control->number == 64)
+            s << " That's the sustain pedal, so it will also hold notes while you play.";
+        say (s, "Help", name + " assigned.");
+        return;
+    }
+    if (auto* b = controls.match (device, m))
+        commandList.run (b->commandId, b->args, CommandList::Source::midi);
 }
 
 //==============================================================================
@@ -438,6 +499,9 @@ juce::String AppCore::setAudio (const juce::String& input, const juce::String& o
     if (rate > 0) setup.sampleRate = rate;
     if (buffer > 0) setup.bufferSize = buffer;
     setAsideNote.clear();
+    if (input.isNotEmpty()) preferredInput = input;
+    if (output.isNotEmpty()) preferredOutput = output;
+    saveAppSettings();
     auto err = jdm.setAudioDeviceSetup (setup, true);
     engine.getDeviceManager().dispatchPendingUpdates();
     if (err.isNotEmpty())
@@ -922,8 +986,8 @@ void AppCore::registerCommands()
         c.available = [this, needSong]
         {
             if (song == nullptr) return needSong();
-            if (capture == nullptr || capture->getRecorder() == nullptr)
-                return Availability::no ("Nothing is being captured. No audio inputs are open.");
+            if (capture == nullptr || (capture->getRecorder() == nullptr && capture->getMidi() == nullptr))
+                return Availability::no ("Nothing is being captured. No audio interface is open.");
             return Availability::yes();
         };
         c.undoable = true;
@@ -940,8 +1004,15 @@ void AppCore::registerCommands()
         c.description = "Says how long capture has been running, how much room is left, and whether anything dropped.";
         c.run = [this] (const CommandArgs&)
         {
-            if (capture == nullptr || capture->getRecorder() == nullptr)
-                return CommandResult::done ("Nothing is being captured. No audio inputs are open.");
+            if (capture == nullptr || (capture->getRecorder() == nullptr && capture->getMidi() == nullptr))
+                return CommandResult::done ("Nothing is being captured. No audio interface is open.");
+            if (capture->getRecorder() == nullptr)
+            {
+                const int n = capture->getMidi()->devices().size();
+                return CommandResult::done ("No audio inputs are open, so only MIDI is being kept"
+                                            + (n > 0 ? ", from " + juce::String (n) + (n == 1 ? " device." : " devices.") : juce::String (".")),
+                                            "MIDI only.");
+            }
             auto* r = capture->getRecorder();
             const auto secs = (double) r->getPushedSamples() / std::max (1.0, r->getStore().getInfo().sampleRate);
             return CommandResult::done (r->status(), juce::String (r->getStore().getInfo().numInputs()) + " inputs, "
@@ -1182,7 +1253,16 @@ void AppCore::registerCommands()
         Command c; c.id = "speech.stop"; c.name = "Stop speaking"; c.category = "Speech"; c.isReport = true;
         c.description = "Stops the current message and drops anything waiting.";
         c.tags = { "quiet", "silence", "shut up" };
-        c.run = [this] (const CommandArgs&) { speaker.stopSpeaking(); return CommandResult::done(); };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (learningCommand.isNotEmpty())
+            {
+                learningCommand.clear();
+                return CommandResult::done ("Cancelled. Nothing was assigned.");
+            }
+            speaker.stopSpeaking();
+            return CommandResult::done();
+        };
         add (c);
     }
     {
@@ -1258,6 +1338,72 @@ void AppCore::registerCommands()
             saveAppSettings();
             if (onSongChanged) onSongChanged();
             return CommandResult::done ("Text " + juce::String (juce::roundToInt (textScale * 100)) + " percent.");
+        };
+        add (c);
+    }
+
+    // MIDI controls
+    {
+        Command c; c.id = "controls.learn"; c.name = "Assign a MIDI control"; c.category = "Help";
+        c.description = "Chooses a command, then the next pedal, footswitch, pad, key or button you press on a MIDI device runs it.";
+        c.tags = { "midi learn", "footswitch", "pedal", "pad", "controller", "control surface", "foot" };
+        c.askForSettings = true;
+        ArgSpec a; a.name = "command"; a.type = ArgSpec::Type::choice; a.defaultValue = "Keep";
+        a.liveChoices = [this]
+        {
+            juce::StringArray names;
+            for (auto& id : commandList.allIds())
+                if (auto* cmd = commandList.find (id); cmd != nullptr && ! id.startsWith ("controls."))
+                    names.addIfNotAlreadyThere (cmd->name);
+            names.sort (true);
+            return names;
+        };
+        c.args = { a };
+        c.run = [this] (const CommandArgs& args)
+        {
+            const auto name = args["command"].toString();
+            for (auto& id : commandList.allIds())
+                if (auto* cmd = commandList.find (id); cmd != nullptr && cmd->name == name)
+                {
+                    learningCommand = id;
+                    learningSince = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+                    return CommandResult::done ("Press the pedal, pad, key or button you want for " + name
+                                                + ". Escape cancels.", "Press a control for " + name + ".");
+                }
+            return CommandResult::failed ("There's no command called " + name + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "controls.list"; c.name = "MIDI controls"; c.category = "Help"; c.isReport = true;
+        c.description = "Says every MIDI control that's assigned and what it runs.";
+        c.tags = { "midi learn", "footswitch", "pedal", "assigned" };
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (controls.listSentence()); };
+        add (c);
+    }
+    {
+        Command c; c.id = "controls.remove"; c.name = "Remove a MIDI control"; c.category = "Help";
+        c.description = "Removes one assigned MIDI control.";
+        c.askForSettings = true;
+        c.available = [this] { return controls.all().empty() ? Availability::no ("No MIDI controls are assigned.") : Availability::yes(); };
+        ArgSpec a; a.name = "control"; a.type = ArgSpec::Type::choice; a.defaultValue = "";
+        a.liveChoices = [this]
+        {
+            juce::StringArray out;
+            for (auto& b : controls.all())
+                if (auto* cmd = commandList.find (b.commandId)) out.add (b.describe() + ", " + cmd->name);
+            return out;
+        };
+        c.args = { a };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto choices = juce::StringArray();
+            for (auto& b : controls.all())
+                if (auto* cmd = commandList.find (b.commandId)) choices.add (b.describe() + ", " + cmd->name);
+            const int i = choices.indexOf (args["control"].toString());
+            if (! controls.remove (i)) return CommandResult::failed ("That control isn't assigned.");
+            saveKeymap();
+            return CommandResult::done ("Removed.");
         };
         add (c);
     }
