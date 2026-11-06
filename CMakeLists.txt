@@ -95,3 +95,12 @@ target_sources(commands-test PRIVATE src/commands_test.cpp src/commands/Commands
 target_include_directories(commands-test PRIVATE src)
 target_compile_definitions(commands-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
 target_link_libraries(commands-test PRIVATE juce::juce_core juce::juce_recommended_config_flags)
+
+# speech-test: the speaking layer's timing rules.
+juce_add_console_app(speech-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(speech-test)
+target_compile_features(speech-test PRIVATE cxx_std_20)
+target_sources(speech-test PRIVATE src/speech_test.cpp src/speech/Speech.cpp)
+target_include_directories(speech-test PRIVATE src)
+target_compile_definitions(speech-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(speech-test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_recommended_config_flags)
