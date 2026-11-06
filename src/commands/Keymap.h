@@ -56,11 +56,15 @@ public:
     explicit Keymap (const CommandList&);
 
     // Scopes form a chain toward "global": addScope ("tracks", "main").
-    void addScope (const juce::String& scope, const juce::String& parent);
+    // `words` is how the scope is said after a key: "in the track list".
+    // Empty means the key needs no label there (the main window).
+    void addScope (const juce::String& scope, const juce::String& parent, const juce::String& words = "?");
+    juce::String scopeWords (const juce::String& scope) const;   // "", "everywhere"... ready to append
     juce::StringArray scopeChain (const juce::String& scope) const;
 
     // The shipped defaults, with a version number that goes up whenever they change.
     void setDefaults (std::vector<KeyBinding>, int version);
+    void addDefaults (std::vector<KeyBinding>);   // more shipped keys, e.g. from the window
 
     // Your changes.
     juce::Result bind (const juce::String& keys, const juce::String& commandId,
@@ -96,7 +100,7 @@ public:
 
 private:
     const CommandList& commands;
-    std::map<juce::String, juce::String> parents;
+    std::map<juce::String, juce::String> parents, scopeNames;
     std::vector<KeyBinding> defaults, added;
     juce::StringArray removed;                    // identities of defaults you removed
     int defaultsVersion = 0;

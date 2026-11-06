@@ -301,11 +301,23 @@ void scaleTest (const juce::File& root, int numInputs, double seconds)
          + mb ((double) rec.getBufferBytes()) + " buffer. Writing "
          + mb (rec.getBytesPerSecond()) + " a second.");
 
-    auto fr = feed (rec, numInputs, seconds, 256, 1);
+    // Feed from a real-time thread, as a real audio interface would.
+    FeedResult fr;
+    {
+        struct Feeder : juce::Thread
+        {
+            Feeder (CaptureRecorder& r, int n, double s) : juce::Thread ("Test audio thread"), rec (r), num (n), secs (s) {}
+            void run() override { result = feed (rec, num, secs, 256, 1); }
+            CaptureRecorder& rec; int num; double secs; FeedResult result;
+        } feeder (rec, numInputs, seconds);
+        feeder.startRealtimeThread (juce::Thread::RealtimeOptions{}.withPeriodMs (256.0 / 48.0));
+        while (feeder.isThreadRunning()) juce::Thread::sleep (50);
+        fr = feeder.result;
+    }
     check (rec.getDroppedSamples() == 0, juce::String (numInputs) + " inputs: nothing dropped ("
            + juce::String (rec.getDroppedSamples()) + " samples).");
-    say ("The slowest hand-off from the audio thread took " + juce::String (fr.maxPushMicros, 0)
-         + " microseconds, out of 5333.");
+    check (fr.maxPushMicros < 1000.0, "the slowest hand-off from the audio thread took " + juce::String (fr.maxPushMicros, 0)
+           + " microseconds, well inside the 5333 a 256-sample block allows.");
 
     auto t0 = juce::Time::getMillisecondCounterHiRes();
     auto r = rec.keepLast (20, {}, root.getChildFile ("keptscale" + juce::String (numInputs)), "Take");

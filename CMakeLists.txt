@@ -121,3 +121,45 @@ target_link_libraries(session-test PRIVATE
 if (APPLE)
     target_compile_options(session-test PRIVATE "-fno-aligned-allocation")
 endif()
+
+# The app, and its self-test (the same window code, never shown).
+set(EARFIRST_APP_SOURCES
+    src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
+    src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp
+    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/CaptureRecorder.cpp)
+set(EARFIRST_APP_DEFS
+    JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1 JUCE_STRICT_REFCOUNTEDPOINTER=1
+    JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0 TRACKTION_LOG_DEVICES=0
+    JUCE_APPLICATION_NAME_STRING="Ear First" JUCE_APPLICATION_VERSION_STRING="0.1.0")
+set(EARFIRST_APP_LIBS
+    tracktion::tracktion_core tracktion::tracktion_engine tracktion::tracktion_graph
+    juce::juce_audio_devices juce::juce_audio_processors juce::juce_audio_utils juce::juce_gui_extra
+    juce::juce_recommended_config_flags)
+
+juce_add_gui_app(EarFirst
+    PRODUCT_NAME "Ear First"
+    VERSION 0.1.0
+    BUNDLE_ID com.matthewwhitaker.earfirst
+    COMPANY_NAME "Matthew Whitaker"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Ear First keeps everything you play on every input, so you can keep a take after you've played it."
+    NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(EarFirst)
+target_compile_features(EarFirst PRIVATE cxx_std_20)
+target_sources(EarFirst PRIVATE ${EARFIRST_APP_SOURCES})
+target_include_directories(EarFirst PRIVATE src)
+target_compile_definitions(EarFirst PRIVATE ${EARFIRST_APP_DEFS})
+target_link_libraries(EarFirst PRIVATE ${EARFIRST_APP_LIBS})
+
+juce_add_console_app(ear-first-selftest NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(ear-first-selftest)
+target_compile_features(ear-first-selftest PRIVATE cxx_std_20)
+target_sources(ear-first-selftest PRIVATE ${EARFIRST_APP_SOURCES})
+target_include_directories(ear-first-selftest PRIVATE src)
+target_compile_definitions(ear-first-selftest PRIVATE ${EARFIRST_APP_DEFS} EARFIRST_SELFTEST_MAIN=1)
+target_link_libraries(ear-first-selftest PRIVATE ${EARFIRST_APP_LIBS})
+
+if (APPLE)
+    target_compile_options(EarFirst PRIVATE "-fno-aligned-allocation")
+    target_compile_options(ear-first-selftest PRIVATE "-fno-aligned-allocation")
+endif()

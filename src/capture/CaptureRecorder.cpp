@@ -1,4 +1,7 @@
 #include "CaptureRecorder.h"
+#if JUCE_MAC
+ #include <pthread/qos.h>
+#endif
 
 namespace earfirst
 {
@@ -285,9 +288,25 @@ CaptureRecorder::CaptureRecorder (Options o)
     if (numGroups > 1)
         pool = std::make_unique<juce::ThreadPool> (juce::ThreadPoolOptions{}
                                                        .withThreadName ("Capture writer")
-                                                       .withNumberOfThreads (numGroups - 1));
+                                                       .withNumberOfThreads (numGroups - 1)
+                                                       .withDesiredThreadPriority (juce::Thread::Priority::low));
 
-    drainThread = std::thread ([this] { drainLoop(); });
+    // Touch every page of the buffer now, so the audio thread never pays for
+    // the system handing memory over the first time it writes there.
+    for (auto& ch : sampleBuffer)
+        for (size_t i = 0; i < ch.size(); i += 1024)
+            reinterpret_cast<volatile float&> (ch[i]) = 0.0f;
+
+    // Disk work runs below the audio thread and below the app's own threads:
+    // it has seconds of buffer to catch up in, the audio thread has
+    // milliseconds.
+    drainThread = std::thread ([this]
+    {
+       #if JUCE_MAC
+        pthread_set_qos_class_self_np (QOS_CLASS_UTILITY, 0);
+       #endif
+        drainLoop();
+    });
 }
 
 CaptureRecorder::~CaptureRecorder()

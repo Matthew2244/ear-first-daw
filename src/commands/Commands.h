@@ -79,6 +79,7 @@ struct Command
     std::function<Availability()> available;            // optional; default always available
     std::function<std::optional<bool>()> toggleState;   // optional; present means this is a toggle
     juce::String onWord = "on", offWord = "off";        // "Metronome on", "Track 3 armed"
+    bool sayNameWithState = true;                      // false: just "Playing" / "Stopped"
 
     bool isToggle() const   { return toggleState != nullptr; }
 };

@@ -236,7 +236,8 @@ CommandResult CommandList::runInternal (const Command& c, const CommandArgs& arg
     // A toggle says its new state, new state first, whatever the command said.
     if (r.ok && c.isToggle())
         if (auto state = c.toggleState())
-            r.spoken = c.name + " " + (*state ? c.onWord : c.offWord) + (r.spoken.isNotEmpty() ? ". " + r.spoken : juce::String());
+            r.spoken = (c.sayNameWithState ? c.name + " " : juce::String()) + (*state ? c.onWord : c.offWord)
+                       + (r.spoken.isNotEmpty() ? ". " + r.spoken : juce::String());
 
     if (r.ok && ! c.isReport && source != Source::repeat && source != Source::macro)
         lastRepeatable = MacroStep { c.id, filled };

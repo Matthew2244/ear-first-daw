@@ -182,7 +182,18 @@ juce::String KeyBinding::identity() const
 
 Keymap::Keymap (const CommandList& c) : commands (c) {}
 
-void Keymap::addScope (const juce::String& scope, const juce::String& parent)   { parents[scope] = parent; }
+void Keymap::addScope (const juce::String& scope, const juce::String& parent, const juce::String& words)
+{
+    parents[scope] = parent;
+    scopeNames[scope] = words == "?" ? "in " + scope : words;
+}
+
+juce::String Keymap::scopeWords (const juce::String& scope) const
+{
+    if (scope == "global") return {};
+    auto it = scopeNames.find (scope);
+    return it != scopeNames.end() ? it->second : "in " + scope;
+}
 
 juce::StringArray Keymap::scopeChain (const juce::String& scope) const
 {
@@ -204,6 +215,15 @@ void Keymap::setDefaults (std::vector<KeyBinding> d, int version)
     for (auto& b : d) b.keys = keysToText (parseKeys (b.keys));
     defaults = std::move (d);
     defaultsVersion = version;
+}
+
+void Keymap::addDefaults (std::vector<KeyBinding> more)
+{
+    for (auto& b : more)
+    {
+        b.keys = keysToText (parseKeys (b.keys));
+        defaults.push_back (b);
+    }
 }
 
 std::vector<KeyBinding> Keymap::effective() const
@@ -302,7 +322,10 @@ juce::StringArray Keymap::keysFor (const juce::String& commandId) const
     juce::StringArray out;
     for (auto& b : effective())
         if (b.commandId == commandId)
-            out.add (keysForPeople (parseKeys (b.keys)) + (b.scope != "global" ? " in " + b.scope : juce::String()));
+        {
+            auto where = scopeWords (b.scope);
+            out.add (keysForPeople (parseKeys (b.keys)) + (where.isNotEmpty() ? " " + where : juce::String()));
+        }
     return out;
 }
 
@@ -324,7 +347,8 @@ std::vector<Keymap::Conflict> Keymap::conflicts() const
             auto an = ca ? ca->name : a.commandId, bn = cb ? cb->name : b.commandId;
             auto shorter = a.keys.length() <= b.keys.length() ? a : b;
             Conflict c { a.scope, shorter.keys, { a.commandId, b.commandId }, {} };
-            const auto where = a.scope == "global" ? juce::String ("everywhere") : "in " + a.scope;
+            const auto words = scopeWords (a.scope);
+            const auto where = words.isEmpty() ? juce::String ("everywhere") : words;
             c.sentence = same ? keysForPeople (parseKeys (a.keys)) + " runs both " + an + " and " + bn + " " + where + "."
                               : keysForPeople (parseKeys (shorter.keys)) + " runs " + (shorter.commandId == a.commandId ? an : bn)
                                     + " " + where + ", so the longer key that starts with it can never be reached.";
@@ -453,7 +477,7 @@ juce::String Keymap::exportReadable (Platform p) const
     {
         auto* c = commands.find (b.commandId);
         auto line = (c ? c->name : b.commandId) + ": " + keysForPeople (parseKeys (b.keys), p)
-                    + (b.scope != "global" ? " (in " + b.scope + ")" : juce::String());
+                    + (scopeWords (b.scope).isNotEmpty() ? " (" + scopeWords (b.scope) + ")" : juce::String());
         byCategory[c ? c->category : juce::String ("Other")].add (line);
     }
     juce::String out;
