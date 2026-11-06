@@ -122,6 +122,10 @@ if (APPLE)
     target_compile_options(session-test PRIVATE "-fno-aligned-allocation")
 endif()
 
+# The click's built-in sounds, picked by ear (Matthew, 6 November 2026), carried inside the app.
+juce_add_binary_data(earfirst_click_sounds HEADER_NAME ClickSoundsData.h NAMESPACE ClickSoundsData
+    SOURCES "src/click/sounds/Clave.wav" "src/click/sounds/Cowbell 1.wav" "src/click/sounds/Cowbell 2.wav" "src/click/sounds/Hi-hat.wav")
+
 # The app, and its self-test (the same window code, never shown).
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
@@ -137,7 +141,7 @@ set(EARFIRST_APP_DEFS
 set(EARFIRST_APP_LIBS
     tracktion::tracktion_core tracktion::tracktion_engine tracktion::tracktion_graph
     juce::juce_audio_devices juce::juce_audio_processors juce::juce_audio_utils juce::juce_gui_extra
-    juce::juce_recommended_config_flags)
+    earfirst_click_sounds juce::juce_recommended_config_flags)
 
 juce_add_gui_app(EarFirst
     PRODUCT_NAME "Ear First"
@@ -226,7 +230,7 @@ target_compile_definitions(click-test PRIVATE
 target_link_libraries(click-test PRIVATE
     tracktion::tracktion_core tracktion::tracktion_engine tracktion::tracktion_graph
     juce::juce_audio_devices juce::juce_audio_processors juce::juce_audio_utils
-    juce::juce_recommended_config_flags)
+    earfirst_click_sounds juce::juce_recommended_config_flags)
 if (APPLE)
     target_compile_options(click-test PRIVATE "-fno-aligned-allocation")
 endif()

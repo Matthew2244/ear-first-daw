@@ -35,6 +35,8 @@ public:
     void setFolder (const juce::File& f)        { std::lock_guard<std::mutex> g (lock); folder = f; }
     juce::File getFolder() const                { std::lock_guard<std::mutex> g (lock); return folder; }
 
+    // The recorded sounds that come with Ear First, picked by ear.
+    static juce::StringArray builtInNames()     { return { "Clave", "Cowbell 1", "Cowbell 2", "Hi-hat" }; }
     // Names of the imported sounds, in alphabetical order.
     juce::StringArray names() const;
     static juce::StringArray audioExtensions()  { return { "wav", "aif", "aiff", "flac", "mp3", "m4a", "ogg", "caf" }; }
@@ -43,8 +45,8 @@ public:
     juce::StringArray import (const juce::Array<juce::File>&, juce::StringArray& problems);
     bool remove (const juce::String& name);
 
-    // Message thread: the sound ready to play at this rate, or null if it's
-    // missing or unreadable. The result stays valid until the app quits, so
+    // Message thread: the sound ready to play at this rate (built in or
+    // imported), or null if it's missing or unreadable. The result stays valid until the app quits, so
     // the audio thread can play it without holding a reference.
     std::shared_ptr<const ClickSample> load (const juce::String& name, double sampleRate);
 

@@ -1,4 +1,5 @@
 #include "click/ClickSamples.h"
+#include "ClickSoundsData.h"
 
 namespace earfirst
 {
@@ -50,7 +51,7 @@ juce::StringArray ClickSamples::import (const juce::Array<juce::File>& files, ju
         // Its own name; a second sound with the same name gets a number.
         auto base = f.getFileNameWithoutExtension().trim();
         if (base.isEmpty()) base = "Sound";
-        if (juce::StringArray { "Woodblock", "Beep", "Clave", "Rim", "Cowbell", "Hi-hat" }.contains (base, true)) base << " (yours)";
+        if (builtInNames().contains (base, true) || base.equalsIgnoreCase ("Beep")) base << " (yours)";
         auto name = base;
         for (int n = 2; fileFor (name).existsAsFile(); ++n) name = base + " " + juce::String (n);
         auto dest = dir.getChildFile (juce::File::createLegalFileName (name) + f.getFileExtension().toLowerCase());
@@ -72,9 +73,11 @@ bool ClickSamples::remove (const juce::String& name)
 
 std::shared_ptr<const ClickSample> ClickSamples::load (const juce::String& name, double rate)
 {
-    auto file = fileFor (name);
-    if (! file.existsAsFile() || rate <= 0) return {};
-    const auto key = file.getFullPathName() + "|" + juce::String (file.getLastModificationTime().toMilliseconds())
+    if (rate <= 0) return {};
+    const bool builtIn = builtInNames().contains (name);
+    auto file = builtIn ? juce::File() : fileFor (name);
+    if (! builtIn && ! file.existsAsFile()) return {};
+    const auto key = (builtIn ? "built in|" + name : file.getFullPathName() + "|" + juce::String (file.getLastModificationTime().toMilliseconds()))
                      + "|" + juce::String (rate);
     {
         std::lock_guard<std::mutex> g (lock);
@@ -83,7 +86,19 @@ std::shared_ptr<const ClickSample> ClickSamples::load (const juce::String& name,
 
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
-    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (file));
+    std::unique_ptr<juce::AudioFormatReader> r;
+    if (builtIn)
+    {
+        for (int i = 0; i < ClickSoundsData::namedResourceListSize; ++i)
+            if (juce::String (ClickSoundsData::originalFilenames[i]) == name + ".wav")
+            {
+                int size = 0;
+                if (auto* data = ClickSoundsData::getNamedResource (ClickSoundsData::namedResourceList[i], size))
+                    r.reset (fm.createReaderFor (std::make_unique<juce::MemoryInputStream> (data, (size_t) size, false)));
+            }
+    }
+    else
+        r.reset (fm.createReaderFor (file));
     if (r == nullptr || r->lengthInSamples <= 0 || r->sampleRate <= 0) return {};
 
     // Read up to two seconds plus whatever silence leads in.

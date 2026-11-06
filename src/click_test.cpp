@@ -228,6 +228,19 @@ int main (int argc, char** argv)
     }
 
     say ("");
+    say ("The built-in sounds");
+    {
+        juce::StringArray loaded;
+        for (auto& n : ClickSamples::builtInNames())
+            if (auto x = ClickSamples::get().load (n, 48000); x != nullptr && x->audio.getNumSamples() > 1000) loaded.add (n);
+        check (loaded == ClickSamples::builtInNames(), "every recorded sound that comes with Ear First loads: " + loaded.joinIntoString (", ") + ".");
+        check (ClickSettings::sounds().contains ("Beep"), "the Beep is offered too.");
+        ClickSettings d;
+        check (d.barSound == "Cowbell 1" && d.beatSound == "Clave" && d.subdivisionSound == "Hi-hat",
+               "by default the one is a cowbell, the beats a clave, the subdivisions a hi-hat.");
+    }
+
+    say ("");
     say ("Your own sounds");
     {
         auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ear-first-click-samples-test");
@@ -304,9 +317,24 @@ int main (int argc, char** argv)
         juce::StringArray o; for (auto x : onsets) o.add (juce::String (x));
         check (onBeat, "in the engine at 120, My Stick plays on every beat, within a millisecond (onsets at samples " + o.joinIntoString (", ") + ").");
 
+        // A song from before, asking for a sound that's gone, still clicks.
+        ClickSettings old; old.barSound = old.beatSound = old.subdivisionSound = "Woodblock";
+        click->setSettings (old);
+        tc.setPosition (TimePosition());
+        tc.play (false);
+        e->dispatchPendingUpdatesSynchronously();
+        all.clear();
+        for (int done = 0; done < all.getNumSamples(); done += 256)
+        {
+            auto out = player->process (256);
+            for (int ch = 0; ch < 2; ++ch) all.copyFrom (ch, done, out, ch, 0, 256);
+        }
+        tc.stop (false, false);
+        check (all.getMagnitude (0, 0, 24000) > 0.05f, "a song asking for the old Woodblock clicks with the default sounds instead of going silent.");
+
         ClickSamples::get().remove ("My Stick");
         click->refreshNow();
-        check (! ClickSettings::sounds().contains ("My Stick"), "removed, it's no longer offered, and the song falls back to the woodblock.");
+        check (! ClickSettings::sounds().contains ("My Stick"), "removed, it's no longer offered, and the song falls back to the default sounds.");
         click = nullptr; plugin = nullptr;
         e.reset();
         player.reset();

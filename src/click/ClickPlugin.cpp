@@ -81,9 +81,9 @@ ClickPlugin::ClickPlugin (PluginCreationInfo info) : Plugin (info)
     swing.referTo (state, ids::swing, um, 0.0f);
     accents.referTo (state, ids::accents, um, {});
     subdivisionLevel.referTo (state, ids::subdivisionLevel, um, 0.5f);
-    barSound.referTo (state, ids::barSound, um, "Woodblock");
-    beatSound.referTo (state, ids::beatSound, um, "Woodblock");
-    subdivisionSound.referTo (state, ids::subdivisionSound, um, "Woodblock");
+    barSound.referTo (state, ids::barSound, um, "Cowbell 1");
+    beatSound.referTo (state, ids::beatSound, um, "Clave");
+    subdivisionSound.referTo (state, ids::subdivisionSound, um, "Hi-hat");
     level.referTo (state, ids::level, um, 0.8f);
     countInBars.referTo (state, ids::countInBars, um, 0);
     countInOnly.referTo (state, ids::countInOnly, um, false);
@@ -110,17 +110,20 @@ ClickPlugin::~ClickPlugin()
 void ClickPlugin::rebuildSnapshot()
 {
     auto s = std::make_shared<Snapshot> (Snapshot { edit.tempoSequence.getInternalSequence(), getSettings() });
-    const auto names = ClickSettings::builtInSounds();
-    // A name that isn't built in is one of yours; one that can't be found
-    // (a song from another computer) falls back to the woodblock.
-    auto pick = [&] (const juce::String& name, int& builtIn, std::shared_ptr<const ClickSample>& sample)
+    // A sound that can't be found (one imported on another computer, or one
+    // of the early made-in-code sounds that are gone) plays the default for
+    // that part of the beat instead.
+    const double rate = sampleRate > 0 ? sampleRate : 48000.0;
+    auto pick = [&] (const juce::String& name, const juce::String& fallback, std::shared_ptr<const ClickSample>& sample)
     {
-        builtIn = std::max (0, names.indexOf (name));
-        if (! names.contains (name)) sample = ClickSamples::get().load (name, sampleRate > 0 ? sampleRate : 48000.0);
+        if (name == "Beep") return;
+        sample = ClickSamples::get().load (name, rate);
+        if (sample == nullptr) sample = ClickSamples::get().load (fallback, rate);
     };
-    pick (s->settings.barSound, s->barSound, s->barSample);
-    pick (s->settings.beatSound, s->beatSound, s->beatSample);
-    pick (s->settings.subdivisionSound, s->subdivisionSound, s->subdivisionSample);
+    const ClickSettings defaults;
+    pick (s->settings.barSound, defaults.barSound, s->barSample);
+    pick (s->settings.beatSound, defaults.beatSound, s->beatSample);
+    pick (s->settings.subdivisionSound, defaults.subdivisionSound, s->subdivisionSample);
     if (snapshot != nullptr) retired.push_back (snapshot);
     std::atomic_store (&snapshot, std::shared_ptr<const Snapshot> (std::move (s)));
     // Only the retired list still holds these: safe to free here.
@@ -154,13 +157,6 @@ void ClickPlugin::initialise (const PluginInitialisationInfo&)
 
 void ClickPlugin::deinitialise() {}
 
-void ClickPlugin::start (int sound, double pitch, float amp, int offset)
-{
-    Voice v;
-    v.start (sound, pitch, amp, sampleRate);
-    if (pending.size() < pending.capacity()) pending.push_back ({ offset, v });
-}
-
 void ClickPlugin::render (float* left, float* right, int startSample, int num)
 {
     for (auto& v : voices)
@@ -192,19 +188,16 @@ void ClickPlugin::applyToBuffer (const PluginRenderContext& rc)
         {
             if (t.level <= 0.0f) continue;
             if (s.countInOnly && t.time.inSeconds() >= countInEnd) continue;
-            const int sound = t.kind == ClickTick::Kind::bar ? snap->barSound : t.kind == ClickTick::Kind::beat ? snap->beatSound : snap->subdivisionSound;
             const auto* sample = (t.kind == ClickTick::Kind::bar ? snap->barSample : t.kind == ClickTick::Kind::beat ? snap->beatSample : snap->subdivisionSample).get();
             const double pitch = t.kind == ClickTick::Kind::bar ? 1.5 : t.kind == ClickTick::Kind::beat ? 1.0 : 0.8;
             const int offset = juce::jlimit (0, rc.bufferNumSamples - 1,
                                              (int) std::llround ((t.time - rc.editTime.getStart()).inSeconds() * sampleRate));
+            Voice v;
             if (sample != nullptr)
-            {
-                Voice v;
                 v.startSample (sample->audio.getReadPointer (0), sample->audio.getReadPointer (1), sample->audio.getNumSamples(), t.level * s.level);
-                if (pending.size() < pending.capacity()) pending.push_back ({ offset, v });
-            }
             else
-                start (sound, pitch, t.level * s.level, offset);
+                v.startBeep (pitch, t.level * s.level, sampleRate);
+            if (pending.size() < pending.capacity()) pending.push_back ({ offset, v });
         }
     }
 

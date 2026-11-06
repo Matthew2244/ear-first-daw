@@ -1088,7 +1088,7 @@ void AppCore::registerCommands()
     }
     {
         Command c; c.id = "click.remove-sound"; c.name = "Remove a click sound"; c.category = "Click";
-        c.description = "Removes a click sound you imported. A song that used it clicks with the woodblock instead.";
+        c.description = "Removes a click sound you imported. A song that used it clicks with the default sounds instead.";
         ArgSpec a; a.name = "sound"; a.type = ArgSpec::Type::choice; a.liveChoices = [] { return ClickSamples::get().names(); }; a.defaultValue = "";
         c.args = { a };
         c.askForSettings = true;
@@ -1122,7 +1122,7 @@ void AppCore::registerCommands()
         c.available = needSong;
         auto soundArg = [this] (const char* name, std::function<juce::String (ClickPlugin&)> current)
         {
-            ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.liveChoices = [] { return ClickSettings::sounds(); }; a.defaultValue = "Woodblock";
+            ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.liveChoices = [] { return ClickSettings::sounds(); }; a.defaultValue = "Clave";
             a.currentValue = [this, current] { auto* p = clickPlugin(); return p ? juce::var (current (*p)) : juce::var(); };
             return a;
         };

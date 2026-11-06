@@ -4,7 +4,8 @@
 //
 // What it does now:
 //  - Different sounds for the first beat of the bar, the other beats, and
-//    subdivisions, from a small set made in code (no samples to lose).
+//    subdivisions: recorded sounds that come with Ear First (picked by ear),
+//    the Beep, or sounds you import.
 //  - Each beat loud, normal, soft or silent, from a pattern like "L N S N".
 //  - Subdivisions (eighths, triplets, sixteenths, up to 8 per beat), with swing.
 //  - Count-in, and click only during the count-in if you want.
@@ -24,12 +25,12 @@ struct ClickSettings
     float swing = 0.0f;              // 0..0.75: how late the offbeat subdivisions fall
     juce::String accents;            // per beat in the bar: L loud, N normal, S soft, 0 silent (repeats); empty = the one loud
     float subdivisionLevel = 0.5f;   // subdivisions, relative to a normal beat
-    juce::String barSound = "Woodblock", beatSound = "Woodblock", subdivisionSound = "Woodblock";
+    juce::String barSound = "Cowbell 1", beatSound = "Clave", subdivisionSound = "Hi-hat";
     float level = 0.8f;
     int countInBars = 0;
     bool countInOnly = false;        // click only during the count-in, then stop
 
-    static juce::StringArray builtInSounds()   { return { "Woodblock", "Beep", "Clave", "Rim", "Cowbell", "Hi-hat" }; }
+    static juce::StringArray builtInSounds()   { auto s = ClickSamples::builtInNames(); s.add ("Beep"); return s; }
     // The built-in sounds, then any you've imported.
     static juce::StringArray sounds()          { auto s = builtInSounds(); s.addArray (ClickSamples::get().names()); return s; }
     juce::String describe() const;   // one sentence, for the status key
@@ -93,7 +94,6 @@ public:
 
 private:
     using Voice = ClickVoice;
-    void start (int sound, double pitch, float amp, int offset);
     void render (float* left, float* right, int start, int num);
 
     // Everything the audio thread needs, made on the message thread whenever
@@ -104,9 +104,8 @@ private:
     {
         tracktion::tempo::Sequence tempo;
         ClickSettings settings;
-        int barSound = 0, beatSound = 0, subdivisionSound = 0;
-        // Your own sounds, when chosen (null: the built-in one above). Kept
-        // alive by ClickSamples for the whole run, so voices can point into them.
+        // The recorded sound for each (null: the Beep). Kept alive by
+        // ClickSamples for the whole run, so voices can point into them.
         std::shared_ptr<const ClickSample> barSample, beatSample, subdivisionSample;
     };
     void rebuildSnapshot();
