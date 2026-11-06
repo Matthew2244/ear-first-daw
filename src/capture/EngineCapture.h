@@ -131,7 +131,7 @@ private:
     juce::String interfaceName;
     mutable std::mutex namesLock;               // inputNames and interfaceName, read from the message thread
 
-    tracktion::Edit* edit = nullptr;
+    std::atomic<tracktion::Edit*> edit { nullptr };   // read on the audio thread too
     std::atomic<tracktion::EditPlaybackContext*> context { nullptr };
     std::atomic<int64_t> blockStart { 0 };   // capture sample where the current block begins
     int takeNumber = 0;
@@ -164,7 +164,7 @@ private:
     void placeMidi (Kept&, tracktion::TimePosition at, tracktion::TimeDuration length, int64_t captureStart, const juce::String& takeName);
     Kept finishKeep (Kept, const juce::String& name);   // placement and the sentence, message thread
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
-    std::vector<std::thread> keepThreads;
+    std::vector<std::pair<std::thread, std::shared_ptr<std::atomic<bool>>>> keepThreads;   // and whether each has finished
     void detachMidiTaps();
     std::vector<std::pair<tracktion::InputDeviceInstance*, std::unique_ptr<MidiTap>>> midiTaps;
     std::unique_ptr<MidiCapture> midi;
@@ -208,6 +208,9 @@ private:
     std::map<juce::String, int> returnHits, notReturnCount;   // per input, this run
     std::function<void (const juce::StringArray&, const juce::String&)> sweepDone;
     juce::uint32 sweepAskedAt = 0;
+    std::atomic<bool> returnStateStale { false };   // set when the interface changes; the timer starts afresh
+    std::atomic<int> runNumber { 0 }, sweepRun { -1 };   // which capture run is going, and which one the sweep played in
+    std::atomic<int> roundTripSamples { 8192 };     // output to input through the interface, with room to spare
 
     int maxBlock = 4096;
     int deviceBlock = 512;

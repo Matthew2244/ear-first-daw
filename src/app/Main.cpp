@@ -9,6 +9,7 @@
 
 #include <JuceHeader.h>
 #include "app/AppCore.h"
+#include "click/ClickSamples.h"
 #include "session/Tracks.h"
 #include <iostream>
 
@@ -775,6 +776,7 @@ public:
         core = std::make_unique<AppCore> (output, o);
         window = std::make_unique<MainWindow> (*core, output);
         core->onOpenSongRequested = [this] { chooseSong(); };
+        core->onImportClickSoundsRequested = [this] { chooseClickSounds(); };
         core->onUnsavedClose = [this] (std::function<void()> closeIt) { askToSave (core->session()->getName(), "close it", std::move (closeIt)); };
         window->setVisible (true);
         window->content->tracks.grabKeyboardFocus();
@@ -797,7 +799,9 @@ public:
 
     // Commands named on the command line run once the app is ready, each as if
     // chosen from the menu: open -a "Ear First" --args --run audio.find-computer-input
-    // Works on a running copy too, so scripts and macros can drive it.
+    // To reach a copy that's already running, start the app's own program
+    // ("Ear First.app/Contents/MacOS/Ear First" --run ...): it hands the
+    // commands over and quits. (open -a only brings the running copy forward.)
     void runCommandsFrom (const juce::String& args, int delayMs)
     {
         auto tokens = juce::StringArray::fromTokens (args, true);
@@ -871,6 +875,17 @@ private:
                                   CommandArgs a; a.set ("folder", fc.getResult().getFullPathName());
                                   core->commands().run ("file.open-song", a, CommandList::Source::menu);
                               });
+    }
+
+    void chooseClickSounds()
+    {
+        juce::StringArray patterns;
+        for (auto& e : ClickSamples::audioExtensions()) patterns.add ("*." + e);
+        chooser = std::make_unique<juce::FileChooser> ("Choose sounds for the click",
+            juce::File::getSpecialLocation (juce::File::userMusicDirectory), patterns.joinIntoString (";"));
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                                | juce::FileBrowserComponent::canSelectMultipleItems,
+                              [this] (const juce::FileChooser& fc) { if (core) core->importClickSounds (fc.getResults()); });
     }
 
     ScreenReaderOutput output;

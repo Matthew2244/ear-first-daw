@@ -126,7 +126,7 @@ endif()
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
     src/commands/Commands.cpp src/commands/Keymap.cpp src/commands/MidiControls.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
-    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/ReturnFinder.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp)
+    src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/ReturnFinder.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp src/click/ClickSounds.cpp src/click/ClickSamples.cpp)
 if (APPLE)
     list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)
 endif()
@@ -218,7 +218,7 @@ target_link_libraries(test-keyboard PRIVATE juce::juce_audio_devices juce::juce_
 juce_add_console_app(click-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(click-test)
 target_compile_features(click-test PRIVATE cxx_std_20)
-target_sources(click-test PRIVATE src/click_test.cpp src/click/ClickPlugin.cpp)
+target_sources(click-test PRIVATE src/click_test.cpp src/click/ClickPlugin.cpp src/click/ClickSounds.cpp src/click/ClickSamples.cpp)
 target_include_directories(click-test PRIVATE src)
 target_compile_definitions(click-test PRIVATE
     JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1 JUCE_STRICT_REFCOUNTEDPOINTER=1

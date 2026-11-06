@@ -84,7 +84,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
         capture->onComputerInputsFound = [this] (const juce::String& iface, const juce::StringArray& found)
         {
-            markComputerInputs (iface, found, false);
+            markComputerInputs (iface, found, false, true);
         };
         capture->refreshComputerInputs();
         capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
@@ -112,6 +112,9 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         say ("Ear First " + v + " is out. Check for Updates in the Help menu when you're ready.", "Updates", "Version " + v + " is out.", Speech::Priority::normal, "update");
     };
 
+    // Your click sounds: beside your settings, or a temporary folder when testing.
+    ClickSamples::get().setFolder (options.saveSettings ? appDataFolder().getChildFile ("Click Sounds")
+                                                        : juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("Ear First Test Click Sounds"));
     registerCommands();
     setDefaultKeys();
     if (options.openAudioDevice) loadAppSettings();   // the self-test starts from defaults
@@ -405,15 +408,31 @@ void AppCore::findComputerInputs (bool firstTime)
             juce::AudioDeviceManager::AudioDeviceSetup s;
             engine.getDeviceManager().deviceManager.getAudioDeviceSetup (s);
             const auto iface = capture->getInterfaceName();
+            // The first-time check leaves alone any input you unmarked; asking leaves nothing out.
+            markComputerInputs (iface, found, ! firstTime, false);
+            const auto marked = computerInputsOn (iface);
+            juce::StringArray shown, leftAlone;
+            for (auto& n : found) (marked.contains (n) ? shown : leftAlone).add (n);
             if (! found.isEmpty())
             {
-                markComputerInputs (iface, found, ! firstTime);
-                const bool one = found.size() == 1;
-                say (found.joinIntoString (" and ") + (one ? " carries" : " carry") + " the computer's own sound. "
-                     + (one ? "It's" : "They're") + " marked, so sound on " + (one ? "it" : "them") + " won't count as you playing."
-                     + (firstTime ? " Computer's own sound, in the Audio menu, changes that." : ""),
-                     "Audio", "Found " + found.joinIntoString (" and ") + ".", Speech::Priority::normal, "find-return");
+                juce::String t;
+                if (! shown.isEmpty())
+                {
+                    const bool one = shown.size() == 1;
+                    t << shown.joinIntoString (" and ") << (one ? " carries" : " carry") << " the computer's own sound. "
+                      << (one ? "It's" : "They're") << " marked, so sound on " << (one ? "it" : "them") << " won't count as you playing.";
+                    if (firstTime) t << " Computer's own sound, in the Audio menu, changes that.";
+                }
+                if (! leftAlone.isEmpty())
+                    t << (t.isEmpty() ? "" : " ") << leftAlone.joinIntoString (" and ") << " sounded like the computer's own sound, but you unmarked "
+                      << (leftAlone.size() == 1 ? "it" : "them") << ", so " << (leftAlone.size() == 1 ? "it's" : "they're") << " left as you set.";
+                say (t, "Audio", "Found " + found.joinIntoString (" and ") + ".", Speech::Priority::normal, "find-return");
                 return;
+            }
+            if (firstTime && problem.isNotEmpty())
+            {
+                checkedInterfaces.removeString (iface);   // it didn't get a fair check: try again next time
+                saveAppSettings();
             }
             juce::String s2 = problem.isNotEmpty() ? problem + " " : juce::String();
             s2 << "No input on " << iface << " carries the computer's own sound.";
@@ -424,7 +443,21 @@ void AppCore::findComputerInputs (bool firstTime)
     });
 }
 
-void AppCore::markComputerInputs (const juce::String& iface, const juce::StringArray& inputs, bool evenIfUnmarked)
+void AppCore::importClickSounds (const juce::Array<juce::File>& files)
+{
+    if (files.isEmpty()) return;
+    juce::StringArray problems;
+    auto names = ClickSamples::get().import (files, problems);
+    if (auto* p = clickPlugin()) p->refreshNow();
+    juce::String s;
+    if (! names.isEmpty())
+        s << "Imported " << names.joinIntoString (", ") << ". "
+          << (names.size() == 1 ? "It's" : "They're") << " in Click settings with the built-in sounds.";
+    if (! problems.isEmpty()) s << (s.isEmpty() ? "" : " ") << problems.joinIntoString (" ");
+    say (s, names.isEmpty() ? "Errors" : "Click", names.isEmpty() ? juce::String() : "Imported " + juce::String (names.size()) + ".");
+}
+
+juce::StringArray AppCore::markComputerInputs (const juce::String& iface, const juce::StringArray& inputs, bool evenIfUnmarked, bool speak)
 {
     juce::StringArray added;
     {
@@ -438,14 +471,15 @@ void AppCore::markComputerInputs (const juce::String& iface, const juce::StringA
             list.add (n); added.add (n);
         }
     }
-    if (added.isEmpty()) return;
+    if (added.isEmpty()) return added;
     if (capture) capture->refreshComputerInputs();
     saveAppSettings();
-    if (evenIfUnmarked) return;   // the command that asked says it
+    if (! speak) return added;   // the caller says it
     const bool one = added.size() == 1;
     say (added.joinIntoString (" and ") + (one ? " carries" : " carry") + " the computer's own sound, so sound on "
          + (one ? "it" : "them") + " won't count as you playing. Computer's own sound, in the Audio menu, changes that.",
          "Audio", added.joinIntoString (" and ") + " marked as the computer's own sound.");
+    return added;
 }
 
 juce::StringArray AppCore::computerInputsOn (const juce::String& iface) const
@@ -1041,6 +1075,46 @@ void AppCore::registerCommands()
         add (c);
     }
     {
+        Command c; c.id = "click.import-sounds"; c.name = "Import click sounds"; c.category = "Click";
+        c.description = "Brings in audio files of your own to use as click sounds, for the one, the beats or the subdivisions. "
+                        "They're copied into Ear First, so moving the originals never breaks the click.";
+        c.tags = { "metronome", "sample", "custom", "my own sound", "wav" };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (onImportClickSoundsRequested) onImportClickSoundsRequested();
+            return CommandResult::done();
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "click.remove-sound"; c.name = "Remove a click sound"; c.category = "Click";
+        c.description = "Removes a click sound you imported. A song that used it clicks with the woodblock instead.";
+        ArgSpec a; a.name = "sound"; a.type = ArgSpec::Type::choice; a.liveChoices = [] { return ClickSamples::get().names(); }; a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [] { return ClickSamples::get().names().isEmpty() ? Availability::no ("You haven't imported any click sounds.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            const auto name = args["sound"].toString();
+            if (! ClickSamples::get().remove (name)) return CommandResult::failed ("There's no click sound called " + name + ".");
+            if (auto* p = clickPlugin()) p->refreshNow();
+            return CommandResult::done ("Removed " + name + ".", "Removed.");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "click.show-sounds-folder"; c.name = "Show click sounds folder"; c.category = "Click";
+        c.description = "Opens the folder your imported click sounds are kept in. Audio files dropped there show up in Click settings too.";
+        c.run = [] (const CommandArgs&)
+        {
+            auto f = ClickSamples::get().getFolder();
+            f.createDirectory();
+            f.startAsProcess();
+            return CommandResult::done ("Opened the Click Sounds folder.", "Opened.");
+        };
+        add (c);
+    }
+    {
         Command c; c.id = "click.settings"; c.name = "Click settings"; c.category = "Click";
         c.description = "Sounds, subdivisions, swing, accents, count-in and level for the click.";
         c.tags = { "metronome", "count-in", "accent", "subdivision", "swing", "sound" };
@@ -1048,7 +1122,7 @@ void AppCore::registerCommands()
         c.available = needSong;
         auto soundArg = [this] (const char* name, std::function<juce::String (ClickPlugin&)> current)
         {
-            ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.choices = ClickSettings::sounds(); a.defaultValue = "Woodblock";
+            ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.liveChoices = [] { return ClickSettings::sounds(); }; a.defaultValue = "Woodblock";
             a.currentValue = [this, current] { auto* p = clickPlugin(); return p ? juce::var (current (*p)) : juce::var(); };
             return a;
         };

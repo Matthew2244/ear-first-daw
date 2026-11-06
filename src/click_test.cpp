@@ -227,6 +227,92 @@ int main (int argc, char** argv)
         engine.getDeviceManager().removeHostedAudioDeviceInterface();
     }
 
+    say ("");
+    say ("Your own sounds");
+    {
+        auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("ear-first-click-samples-test");
+        tmp.deleteRecursively();
+        auto src = tmp.getChildFile ("originals"); src.createDirectory();
+        ClickSamples::get().setFolder (tmp.getChildFile ("Click Sounds"));
+
+        // A stick hit at 44.1 kHz with a tenth of a second of silence in front.
+        auto wavFile = src.getChildFile ("My Stick.wav");
+        {
+            juce::AudioBuffer<float> b (2, 44100 / 2);
+            b.clear();
+            for (int i = 0; i < 1323; ++i)
+                for (int c = 0; c < 2; ++c)
+                    b.setSample (c, 4410 + i, 0.3f * std::exp (-i / 300.0f) * (float) std::sin (2 * juce::MathConstants<double>::pi * 1000.0 * i / 44100.0 + 0.5));
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> os (new juce::FileOutputStream (wavFile));
+            auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions{}.withSampleRate (44100).withNumChannels (2).withBitsPerSample (24));
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        }
+        auto notes = src.getChildFile ("notes.txt"); notes.replaceWithText ("not audio");
+
+        juce::StringArray problems;
+        auto names = ClickSamples::get().import ({ wavFile, notes }, problems);
+        check (names == juce::StringArray { "My Stick" } && problems.size() == 1,
+               "importing a WAV and a text file brings in the WAV as My Stick and says the text file isn't audio (" + problems.joinIntoString (" ") + ").");
+        check (ClickSettings::sounds().contains ("My Stick"), "My Stick is offered with the built-in sounds.");
+        auto again = ClickSamples::get().import ({ wavFile }, problems);
+        check (again == juce::StringArray { "My Stick 2" }, "importing it again keeps both, as My Stick 2.");
+        ClickSamples::get().remove ("My Stick 2");
+
+        auto ready = ClickSamples::get().load ("My Stick", 48000);
+        int first = -1;
+        if (ready) for (int i = 0; i < ready->audio.getNumSamples() && first < 0; ++i) if (std::abs (ready->audio.getSample (0, i)) > 0.003f) first = i;
+        check (ready != nullptr && first >= 0 && first <= 16,
+               "made ready at 48 kHz, the silence in front is gone: the sound starts " + juce::String (first) + " samples in.");
+        check (ready != nullptr && std::abs (ready->audio.getMagnitude (0, ready->audio.getNumSamples()) - 0.7f) < 0.02f,
+               "and it's brought to the same loudest point as the built-in sounds.");
+
+        HostedAudioDeviceInterface::Parameters p; p.sampleRate = 48000; p.blockSize = 256; p.inputChannels = 0; p.outputChannels = 2;
+        auto player = std::make_unique<test_utilities::EnginePlayer> (engine, p);
+        auto e = Edit::createSingleTrackEdit (engine);
+        e->tempoSequence.getTempo (0)->setBpm (120.0);
+        auto plugin = e->getPluginCache().createNewPlugin (ClickPlugin::xmlTypeName, {});
+        getAudioTracks (*e)[0]->pluginList.insertPlugin (plugin, 0, nullptr);
+        auto* click = dynamic_cast<ClickPlugin*> (plugin.get());
+        ClickSettings cs; cs.barSound = cs.beatSound = cs.subdivisionSound = "My Stick";
+        click->setSettings (cs);
+        auto& tc = e->getTransport();
+        tc.ensureContextAllocated();
+        tc.play (false);
+        e->dispatchPendingUpdatesSynchronously();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        click->refreshNow();
+        juce::AudioBuffer<float> all (2, 48000 * 2);
+        for (int done = 0; done < all.getNumSamples(); done += 256)
+        {
+            auto out = player->process (256);
+            for (int ch = 0; ch < 2; ++ch) all.copyFrom (ch, done, out, ch, 0, 256);
+        }
+        tc.stop (false, false);
+        std::vector<int> onsets;
+        int quietFor = 100000;
+        for (int i = 0; i < all.getNumSamples(); ++i)
+        {
+            const float v = std::abs (all.getSample (0, i));
+            if (v > 0.01f && quietFor > 2400) onsets.push_back (i);
+            quietFor = v < 0.01f ? quietFor + 1 : 0;
+        }
+        bool onBeat = onsets.size() == 4;
+        for (size_t i = 0; onBeat && i < 4; ++i) onBeat = std::abs (onsets[i] - (int) i * 24000) <= 48;
+        juce::StringArray o; for (auto x : onsets) o.add (juce::String (x));
+        check (onBeat, "in the engine at 120, My Stick plays on every beat, within a millisecond (onsets at samples " + o.joinIntoString (", ") + ").");
+
+        ClickSamples::get().remove ("My Stick");
+        click->refreshNow();
+        check (! ClickSettings::sounds().contains ("My Stick"), "removed, it's no longer offered, and the song falls back to the woodblock.");
+        click = nullptr; plugin = nullptr;
+        e.reset();
+        player.reset();
+        engine.getDeviceManager().closeDevices();
+        engine.getDeviceManager().removeHostedAudioDeviceInterface();
+        tmp.deleteRecursively();
+    }
+
     edit.reset();
     say ("");
     say (failures == 0 ? "All checks passed." : juce::String (failures) + " checks failed.");

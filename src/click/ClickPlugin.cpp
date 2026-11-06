@@ -110,10 +110,17 @@ ClickPlugin::~ClickPlugin()
 void ClickPlugin::rebuildSnapshot()
 {
     auto s = std::make_shared<Snapshot> (Snapshot { edit.tempoSequence.getInternalSequence(), getSettings() });
-    const auto names = ClickSettings::sounds();
-    s->barSound = std::max (0, names.indexOf (s->settings.barSound));
-    s->beatSound = std::max (0, names.indexOf (s->settings.beatSound));
-    s->subdivisionSound = std::max (0, names.indexOf (s->settings.subdivisionSound));
+    const auto names = ClickSettings::builtInSounds();
+    // A name that isn't built in is one of yours; one that can't be found
+    // (a song from another computer) falls back to the woodblock.
+    auto pick = [&] (const juce::String& name, int& builtIn, std::shared_ptr<const ClickSample>& sample)
+    {
+        builtIn = std::max (0, names.indexOf (name));
+        if (! names.contains (name)) sample = ClickSamples::get().load (name, sampleRate > 0 ? sampleRate : 48000.0);
+    };
+    pick (s->settings.barSound, s->barSound, s->barSample);
+    pick (s->settings.beatSound, s->beatSound, s->beatSample);
+    pick (s->settings.subdivisionSound, s->subdivisionSound, s->subdivisionSample);
     if (snapshot != nullptr) retired.push_back (snapshot);
     std::atomic_store (&snapshot, std::shared_ptr<const Snapshot> (std::move (s)));
     // Only the retired list still holds these: safe to free here.
@@ -142,70 +149,29 @@ void ClickPlugin::setSettings (const ClickSettings& s)
 void ClickPlugin::initialise (const PluginInitialisationInfo&)
 {
     voices.clear();
+    triggerAsyncUpdate();   // your own sounds are made ready at the sample rate now in use
 }
 
 void ClickPlugin::deinitialise() {}
 
-namespace
-{
-// Each sound: a base frequency, a length in milliseconds, and how it's made.
-struct SoundDef { double freq; double ms; int kind; };   // 0 sine pluck, 1 two-tone, 2 noise
-const SoundDef& soundDef (int i)
-{
-    static const SoundDef defs[] = {
-        { 1200.0, 30.0, 0 },   // Woodblock
-        { 1000.0, 70.0, 0 },   // Beep
-        { 2500.0, 40.0, 0 },   // Clave
-        { 1700.0, 25.0, 2 },   // Rim
-        { 540.0, 140.0, 1 },   // Cowbell
-        { 8000.0, 45.0, 2 },   // Hi-hat
-    };
-    return defs[juce::jlimit (0, 5, i)];
-}
-}
-
 void ClickPlugin::start (int sound, double pitch, float amp, int offset)
 {
     Voice v;
-    v.sound = sound; v.pitch = pitch; v.amp = amp;
-    v.length = (int) (soundDef (sound).ms * 0.001 * sampleRate);
+    v.start (sound, pitch, amp, sampleRate);
     if (pending.size() < pending.capacity()) pending.push_back ({ offset, v });
 }
 
 void ClickPlugin::render (float* left, float* right, int startSample, int num)
 {
     for (auto& v : voices)
-    {
-        const auto& d = soundDef (v.sound);
-        const double f = d.freq * v.pitch;
-        for (int i = startSample; i < startSample + num && v.age < v.length; ++i, ++v.age)
+        for (int i = startSample; i < startSample + num && ! v.finished(); ++i)
         {
-            const float env = std::exp (-5.0f * (float) v.age / (float) v.length) * (v.age < 16 ? (float) v.age / 16.0f : 1.0f);
-            float x = 0;
-            if (d.kind == 0)
-            {
-                // A pluck with a quick pitch drop: woody, not a beep.
-                const double drop = 1.0 + 0.25 * std::exp (-(double) v.age / (0.004 * sampleRate));
-                v.phase += juce::MathConstants<double>::twoPi * f * drop / sampleRate;
-                x = (float) std::sin (v.phase);
-            }
-            else if (d.kind == 1)
-            {
-                v.phase += juce::MathConstants<double>::twoPi * f / sampleRate;
-                v.phase2 += juce::MathConstants<double>::twoPi * f * 1.48 / sampleRate;
-                x = 0.5f * ((std::sin (v.phase) > 0 ? 1.0f : -1.0f) + (std::sin (v.phase2) > 0 ? 1.0f : -1.0f)) * 0.6f;
-            }
-            else
-            {
-                v.noise = v.noise * 1664525u + 1013904223u;
-                x = ((float) (v.noise >> 9) / 4194304.0f - 1.0f) * 0.7f;
-            }
-            const float out = x * env * v.amp;
-            left[i] += out;
-            if (right != left) right[i] += out;
+            float l, r;
+            v.nextStereo (l, r);
+            left[i] += l;
+            if (right != left) right[i] += r;
         }
-    }
-    voices.erase (std::remove_if (voices.begin(), voices.end(), [] (auto& v) { return v.age >= v.length; }), voices.end());
+    voices.erase (std::remove_if (voices.begin(), voices.end(), [] (auto& v) { return v.finished(); }), voices.end());
 }
 
 void ClickPlugin::applyToBuffer (const PluginRenderContext& rc)
@@ -227,10 +193,18 @@ void ClickPlugin::applyToBuffer (const PluginRenderContext& rc)
             if (t.level <= 0.0f) continue;
             if (s.countInOnly && t.time.inSeconds() >= countInEnd) continue;
             const int sound = t.kind == ClickTick::Kind::bar ? snap->barSound : t.kind == ClickTick::Kind::beat ? snap->beatSound : snap->subdivisionSound;
+            const auto* sample = (t.kind == ClickTick::Kind::bar ? snap->barSample : t.kind == ClickTick::Kind::beat ? snap->beatSample : snap->subdivisionSample).get();
             const double pitch = t.kind == ClickTick::Kind::bar ? 1.5 : t.kind == ClickTick::Kind::beat ? 1.0 : 0.8;
             const int offset = juce::jlimit (0, rc.bufferNumSamples - 1,
                                              (int) std::llround ((t.time - rc.editTime.getStart()).inSeconds() * sampleRate));
-            start (sound, pitch, t.level * s.level, offset);
+            if (sample != nullptr)
+            {
+                Voice v;
+                v.startSample (sample->audio.getReadPointer (0), sample->audio.getReadPointer (1), sample->audio.getNumSamples(), t.level * s.level);
+                if (pending.size() < pending.capacity()) pending.push_back ({ offset, v });
+            }
+            else
+                start (sound, pitch, t.level * s.level, offset);
         }
     }
 

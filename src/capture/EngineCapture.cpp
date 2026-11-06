@@ -34,7 +34,7 @@ EngineCapture::~EngineCapture()
     *alive = false;
     returnTimer.stopTimer();
     returnPool.removeAllJobs (true, 5000);
-    for (auto& t : keepThreads) if (t.joinable()) t.join();   // let exports finish writing their files
+    for (auto& t : keepThreads) if (t.first.joinable()) t.first.join();   // let exports finish writing their files
     stopTimer();
     engine.getDeviceManager().removeChangeListener (this);
     detachMidiTaps();
@@ -66,7 +66,7 @@ EngineCapture::~EngineCapture()
 
 tracktion::EditPlaybackContext* EngineCapture::currentContext() const
 {
-    return edit != nullptr ? edit->getTransport().getCurrentPlaybackContext() : nullptr;
+    return edit != nullptr ? edit.load()->getTransport().getCurrentPlaybackContext() : nullptr;
 }
 
 void EngineCapture::contextChanged()
@@ -98,9 +98,9 @@ void EngineCapture::detachMidiTaps()
 void EngineCapture::attachEdit (Edit* e)
 {
     detachMidiTaps();
-    if (edit != nullptr) edit->getTransport().removeListener (&transportWatch);
+    if (edit != nullptr) edit.load()->getTransport().removeListener (&transportWatch);
     edit = e;
-    if (edit != nullptr) edit->getTransport().addListener (&transportWatch);
+    if (edit != nullptr) edit.load()->getTransport().addListener (&transportWatch);
     EditPlaybackContext* ctx = nullptr;
     if (e != nullptr)
     {
@@ -175,12 +175,18 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         if (active[i]) newNames.add (names[i].isNotEmpty() ? names[i] : "Input " + juce::String (i + 1));
     const double rate = device->getCurrentSampleRate();
 
+    bool sameInterface;
     {
         std::lock_guard<std::mutex> g (namesLock);
+        sameInterface = interfaceName == device->getName();
         interfaceName = device->getName();
     }
+    // How far behind the output an input can hear it: both latencies and a
+    // buffer each way, with as much again to spare.
+    roundTripSamples = juce::jlimit (8192, 1 << 17, 2 * (device->getOutputLatencyInSamples() + device->getInputLatencyInSamples()
+                                                       + 2 * device->getCurrentBufferSizeSamples()) + 2048);
     // Same device, same inputs: carry on with the capture we have.
-    if ((recorder != nullptr || midi != nullptr) && rate == sampleRate && newNames == inputNames)
+    if ((recorder != nullptr || midi != nullptr) && sameInterface && rate == sampleRate && newNames == inputNames)
     {
         refreshComputerInputs();
         return;
@@ -208,7 +214,8 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     sampleRate = rate;
     numInputs = newNames.size();
     sweep = makeSweep (rate);
-    returnHits.clear(); notReturnCount.clear(); returnCheckedUpTo = 0;
+    ++runNumber;
+    returnStateStale = true;   // cleared on the message thread: this can run on the device's own thread
     {
         std::lock_guard<std::mutex> g (namesLock);
         inputNames = newNames;
@@ -352,7 +359,7 @@ void EngineCapture::noteTimeline (int n) noexcept
     auto* ctx = context.load (std::memory_order_acquire);
     // Only use it if it's still the transport's current one (a freed context
     // is replaced, and switched over, as soon as the engine says so).
-    if (ctx != nullptr && edit != nullptr && edit->getTransport().getCurrentPlaybackContext() != ctx)
+    if (ctx != nullptr && edit != nullptr && edit.load()->getTransport().getCurrentPlaybackContext() != ctx)
         ctx = nullptr;
     if (ctx != nullptr)
     {
@@ -364,8 +371,7 @@ void EngineCapture::noteTimeline (int n) noexcept
 
     // A loop can wrap in the middle of a block. Note the exact sample where
     // it does, so every pass lines up to the sample, whatever the block size.
-    if (playing)
-        if (auto* ctx = context.load (std::memory_order_acquire))
+    if (playing && ctx != nullptr)
             if (auto* ph = ctx->getNodePlayHead(); ph != nullptr && ph->isLooping() && ! ph->isRollingIntoLoop())
             {
                 const auto loop = ph->getLoopRange();
@@ -425,12 +431,12 @@ void EngineCapture::placeMidi (Kept& k, TimePosition at, TimeDuration length, in
 
         // The device's own track, made the first time it plays.
         AudioTrack* track = nullptr;
-        for (auto* t : contentTracks (*edit))
+        for (auto* t : contentTracks (*edit.load()))
             if (t->getName() == device) track = t;
         if (track == nullptr)
         {
-            auto all = contentTracks (*edit);
-            auto t = edit->insertNewAudioTrack (TrackInsertPoint (nullptr, all.isEmpty() ? nullptr : all.getLast()), nullptr);
+            auto all = contentTracks (*edit.load());
+            auto t = edit.load()->insertNewAudioTrack (TrackInsertPoint (nullptr, all.isEmpty() ? nullptr : all.getLast()), nullptr);
             if (t == nullptr) continue;
             t->setName (device);
             track = t.get();
@@ -455,6 +461,9 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     }
 
     auto name = "Take " + juce::String (++takeNumber);
+    // What you played up to now is in this take; anything after counts afresh.
+    for (auto& p : playingStarted) p = false;
+    notePlayedSinceKeep = false;
     if (recorder != nullptr)
     {
         juce::Array<int> all;
@@ -481,12 +490,19 @@ void EngineCapture::keepLastInBackground (double seconds, const juce::File& take
     }
     auto rec = recorder;   // keeps the recorder alive even if the interface changes meanwhile
     auto name = "Take " + juce::String (++takeNumber);
+    for (auto& p : playingStarted) p = false;   // cleared now, not when the export lands, so playing meanwhile counts
+    notePlayedSinceKeep = false;
+    // Threads that have finished are joined here, so a long session doesn't pile them up.
+    for (auto it = keepThreads.begin(); it != keepThreads.end();)
+        if (it->second->load()) { it->first.join(); it = keepThreads.erase (it); } else ++it;
+    auto finished = std::make_shared<std::atomic<bool>> (false);
     juce::Array<int> all;
     for (int i = 0; i < numInputs; ++i) all.add (i);
-    keepThreads.emplace_back ([this, rec, all, seconds, takesFolder, name, done, flag = alive]
+    keepThreads.emplace_back (std::thread ([this, rec, all, seconds, takesFolder, name, done, flag = alive, finished]
     {
         Kept k;
         k.take = rec->keepLast (seconds, all, takesFolder, name);
+        *finished = true;
         juce::MessageManager::callAsync ([this, k, name, done, flag]() mutable
         {
             if (! *flag) return;
@@ -494,16 +510,14 @@ void EngineCapture::keepLastInBackground (double seconds, const juce::File& take
             if (edit == nullptr) { k.take.error = "The song closed before the take was ready; its files are in the takes folder."; k.sentence = k.take.error; done (k); return; }
             done (finishKeep (std::move (k), name));
         });
-    });
+    }), finished);
 }
 
 EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
 {
-    for (auto& p : playingStarted) p = false;
-    notePlayedSinceKeep = false;
     const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
-    ensureContentTracks (*edit, numInputs);
-    auto tracks = contentTracks (*edit);
+    ensureContentTracks (*edit.load(), numInputs);
+    auto tracks = contentTracks (*edit.load());
     for (int i = 0; i < numInputs && i < tracks.size(); ++i)
         if (tracks[i]->getName().startsWith ("Track ") || tracks[i]->getName().isEmpty())
             tracks[i]->setName (inputNames[i]);
@@ -570,7 +584,7 @@ EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
         }
         else
         {
-            at = edit->getTransport().getPosition();
+            at = edit.load()->getTransport().getPosition();
         }
         placeOnTracks (at, TimeDuration::fromSamples (k.take.end - k.take.start, sampleRate), {});
     }
@@ -588,7 +602,7 @@ EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
         k.sentence = "Kept " + secondsText (took) + " of MIDI from " + juce::String (k.midiClips.size())
                      + (k.midiClips.size() == 1 ? " device, " : " devices, ")
                      + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
-                     + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart)) + ".";
+                     + (describePlace ? describePlace (*edit.load(), k.timelineStart) : whereText (*edit.load(), k.timelineStart)) + ".";
         k.brief = "Kept " + secondsText (took) + " of MIDI.";
         return k;
     }
@@ -599,7 +613,7 @@ EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
         const int others = (int) k.passes.size() - 1;
         k.sentence = "Kept " + juce::String ((int) k.passes.size()) + " passes of the loop on "
                      + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords
-                     + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart))
+                     + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + (describePlace ? describePlace (*edit.load(), k.timelineStart) : whereText (*edit.load(), k.timelineStart))
                      + (others == 1 ? ". The other pass is saved" : ". The other " + juce::String (others) + " are saved")
                      + " with the take for comping.";
         if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;
@@ -609,7 +623,7 @@ EngineCapture::Kept EngineCapture::finishKeep (Kept k, const juce::String& name)
     k.sentence = "Kept " + secondsText (took) + " on " + juce::String (k.take.files.size())
                  + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords + ", "
                  + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
-                 + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart)) + ".";
+                 + (describePlace ? describePlace (*edit.load(), k.timelineStart) : whereText (*edit.load(), k.timelineStart)) + ".";
     k.brief = "Kept " + secondsText (took) + ", " + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs")
               + (k.midiClips.isEmpty() ? juce::String() : " and " + juce::String (k.midiClips.size()) + " MIDI") + ".";
     if (k.secondsBeforeSongStart >= 0.5)
@@ -638,6 +652,7 @@ void EngineCapture::renderSweep (float* const* out, int numOut, int n, int64_t b
     if (sweepRequested.exchange (false) && ! sweep.empty())
     {
         sweepPos = 0;
+        sweepRun.store (runNumber.load());
         sweepStartedAt.store (blockPos, std::memory_order_release);
     }
     if (sweepPos < 0) return;
@@ -650,6 +665,7 @@ void EngineCapture::renderSweep (float* const* out, int numOut, int n, int64_t b
 void EngineCapture::findComputerInputsNow (std::function<void (const juce::StringArray&, const juce::String&)> done)
 {
     if (recorder == nullptr) { done ({}, "No audio inputs are open."); return; }
+    if (sweepDone != nullptr) { done ({}, "A check is already running."); return; }
     sweepStartedAt = -1;
     sweepDone = std::move (done);
     sweepAskedAt = juce::Time::getMillisecondCounter();
@@ -658,12 +674,32 @@ void EngineCapture::findComputerInputsNow (std::function<void (const juce::Strin
 
 void EngineCapture::checkForReturns()
 {
+    auto giveUpSweep = [this] (const juce::String& why)
+    {
+        sweepRequested = false;
+        sweepStartedAt = -1;
+        auto d = std::move (sweepDone); sweepDone = nullptr;
+        if (d) d ({}, why);
+    };
+    if (returnStateStale.exchange (false))
+    {
+        // A new interface or run: counts and positions from the old one mean nothing here.
+        returnHits.clear(); notReturnCount.clear(); returnCheckedUpTo = 0;
+        if (sweepDone != nullptr && sweepStartedAt.load() >= 0 && sweepRun.load() != runNumber.load())
+            giveUpSweep ("The interface changed during the check. Try again.");
+    }
+    if (sweepDone != nullptr && juce::Time::getMillisecondCounter() - sweepAskedAt > 15000)
+    {
+        giveUpSweep ("The check didn't finish in time. Try again.");
+        return;
+    }
+
     auto rec = recorder;
     if (rec == nullptr || sampleRate <= 0 || returnCheckBusy) return;
 
-    // What's safely on disk: a second behind what's been captured.
-    const int64_t onDisk = rec->getPushedSamples() - (int64_t) sampleRate;
-    const int maxLag = 8192;   // up to 170 ms at 48 kHz: a round trip through the interface
+    // What's on disk: the writer's own position.
+    const int64_t onDisk = rec->getWrittenSamples();
+    const int maxLag = roundTripSamples.load();
     int64_t start = 0; int len = 0; bool forSweep = false;
 
     if (sweepDone != nullptr)
@@ -673,11 +709,7 @@ void EngineCapture::checkForReturns()
         {
             // Asked, but the sweep hasn't started: the device isn't running.
             if (juce::Time::getMillisecondCounter() - sweepAskedAt > 3000)
-            {
-                sweepRequested = false;
-                auto d = std::move (sweepDone); sweepDone = nullptr;
-                d ({}, "The interface isn't running, so nothing could be played.");
-            }
+                giveUpSweep ("The interface isn't running, so nothing could be played.");
             return;
         }
         if (onDisk < at + (int64_t) sweep.size() + maxLag) return;   // not all back yet
@@ -689,7 +721,11 @@ void EngineCapture::checkForReturns()
         start = onDisk - len;
         if (start < returnCheckedUpTo + len) return;   // a fresh window each time
     }
-    if (start < 0 || start - maxLag < outWritten.load() - outRingSize + 1000) return;
+    if (start < 0 || start - maxLag < outWritten.load() - outRingSize + 1000)
+    {
+        if (forSweep) giveUpSweep ("The check fell behind. Try again.");   // what went out is already gone from memory
+        return;
+    }
     returnCheckedUpTo = start;
 
     std::vector<float> out ((size_t) (len + maxLag));

@@ -11,6 +11,8 @@
 // Coming next on the same track: grooves as the click (a loop, a MIDI file,
 // your own drum take, any instrument), layers, and a spoken count.
 
+#include "click/ClickSounds.h"
+#include "click/ClickSamples.h"
 #include <JuceHeader.h>
 
 namespace earfirst
@@ -27,7 +29,9 @@ struct ClickSettings
     int countInBars = 0;
     bool countInOnly = false;        // click only during the count-in, then stop
 
-    static juce::StringArray sounds()   { return { "Woodblock", "Beep", "Clave", "Rim", "Cowbell", "Hi-hat" }; }
+    static juce::StringArray builtInSounds()   { return { "Woodblock", "Beep", "Clave", "Rim", "Cowbell", "Hi-hat" }; }
+    // The built-in sounds, then any you've imported.
+    static juce::StringArray sounds()          { auto s = builtInSounds(); s.addArray (ClickSamples::get().names()); return s; }
     juce::String describe() const;   // one sentence, for the status key
 };
 
@@ -88,7 +92,7 @@ public:
     juce::CachedValue<bool> countInOnly;
 
 private:
-    struct Voice { int sound = 0; double pitch = 1.0, phase = 0, phase2 = 0; float amp = 0; int age = 0, length = 0; juce::uint32 noise = 1; };
+    using Voice = ClickVoice;
     void start (int sound, double pitch, float amp, int offset);
     void render (float* left, float* right, int start, int num);
 
@@ -101,6 +105,9 @@ private:
         tracktion::tempo::Sequence tempo;
         ClickSettings settings;
         int barSound = 0, beatSound = 0, subdivisionSound = 0;
+        // Your own sounds, when chosen (null: the built-in one above). Kept
+        // alive by ClickSamples for the whole run, so voices can point into them.
+        std::shared_ptr<const ClickSample> barSample, beatSample, subdivisionSample;
     };
     void rebuildSnapshot();
     void handleAsyncUpdate() override                           { rebuildSnapshot(); }

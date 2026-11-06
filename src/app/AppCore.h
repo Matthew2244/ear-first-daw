@@ -61,6 +61,9 @@ public:
     juce::String closeSong();
     std::function<void()> onSongChanged;        // the window refreshes its lists
     std::function<void()> onOpenSongRequested;  // the window shows a folder chooser
+    std::function<void()> onImportClickSoundsRequested;   // the window shows a file chooser, then calls importClickSounds
+    // Copies audio files in as click sounds and says what happened.
+    void importClickSounds (const juce::Array<juce::File>&);
     std::function<void()> onShowPalette;        // the window shows Find a command
     bool keyHelpOn = false;                     // key help: keys say what they do instead of doing it
     std::function<void (std::function<void()>)> onUnsavedClose;   // ask save / don't save / cancel, then run it
@@ -131,7 +134,8 @@ private:
     // Per interface, the inputs that carry the computer's own sound.
     std::map<juce::String, juce::StringArray> computerInputs;
     std::map<juce::String, juce::StringArray> notComputerInputs;   // ones you unmarked: never marked again by itself
-    void markComputerInputs (const juce::String& interfaceName, const juce::StringArray& inputs, bool evenIfUnmarked);
+    // Marks them; returns the ones newly marked. Says so only when `speak`.
+    juce::StringArray markComputerInputs (const juce::String& interfaceName, const juce::StringArray& inputs, bool evenIfUnmarked, bool speak);
 public:
     // Plays the sweep and marks what comes back. firstTime: only if this
     // interface has never been checked, and says it's the first time.
