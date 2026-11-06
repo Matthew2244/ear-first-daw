@@ -67,13 +67,20 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         if (active[i]) newNames.add (names[i].isNotEmpty() ? names[i] : "Input " + juce::String (i + 1));
     const double rate = device->getCurrentSampleRate();
 
-    // Same device shape: carry on with the capture we have.
-    if (recorder != nullptr && rate == sampleRate && newNames.size() == numInputs)
+    // Same device, same inputs: carry on with the capture we have.
+    if (recorder != nullptr && rate == sampleRate && newNames == inputNames)
         return;
 
     if (recorder != nullptr)
+    {
+        // Never lose audio on a switch: keep it on disk as recovered audio.
+        const auto had = (double) recorder->getPushedSamples() / sampleRate;
+        auto folder = recorder->getStore().getFolder();
+        if (had > 0.5) recorder->keepFilesOnClose();
         recorder->stop();
-    recorder.reset();
+        recorder.reset();
+        if (had > 0.5 && onCaptureSetAside) onCaptureSetAside (folder, had);
+    }
     blockStart = 0;
     sampleRate = rate;
     numInputs = newNames.size();

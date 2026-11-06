@@ -47,6 +47,22 @@ public:
     std::function<void()> onSongChanged;        // the window refreshes its lists
     std::function<void()> onOpenSongRequested;  // the window shows a folder chooser
 
+    // Run a command the way a person asked for it: from a menu or the
+    // palette, a command that needs settings shows its form first.
+    CommandResult runFromUser (const juce::String& id, CommandList::Source);
+    std::function<void (const Command&)> onSettingsNeeded;   // the window shows the form
+
+    // The audio interface.
+    juce::String audioSentence() const;
+    // Short lines for the screen: what's playing and what capture is doing.
+    juce::String transportLine() const;
+    juce::String captureLine() const;
+    // Text size for everyone who reads the screen, kept between launches.
+    float textScale = 1.0f;
+    juce::StringArray inputDeviceNames() const;
+    juce::StringArray outputDeviceNames() const;
+    juce::String setAudio (const juce::String& input, const juce::String& output, double rate, int buffer);
+
     // Tracks, for the window's list.
     int selectedTrack = 0;
 
@@ -54,6 +70,8 @@ public:
     juce::File keymapFile() const;
     static juce::File appDataFolder();   // ~/Library/Application Support/Ear First on the Mac
     void saveKeymap();
+    void saveAppSettings();
+    void loadAppSettings();
 
     static constexpr int keymapDefaultsVersion = 1;
 
@@ -74,6 +92,7 @@ private:
     std::unique_ptr<Updater> updates;
     Session::OpenReport lastOpenReport;
     double lastAutosave = 0;
+    juce::String setAsideNote;   // said after a device switch kept the old capture
     bool wasPlaying = false;
 };
 

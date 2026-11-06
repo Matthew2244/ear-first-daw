@@ -157,7 +157,8 @@ public:
         if (auto b = km.lookup (pending, scope))
         {
             pending.clear();
-            core.commands().run (b->commandId, b->args, CommandList::Source::key);
+            if (b->args.size() > 0) core.commands().run (b->commandId, b->args, CommandList::Source::key);
+            else core.runFromUser (b->commandId, CommandList::Source::key);
             return true;
         }
         if (km.isPrefix (pending, scope))
@@ -238,7 +239,7 @@ public:
         if (row < 0 || row >= (int) found.size()) return {};
         auto id = found[(size_t) row]->id;
         if (close) close();
-        core.commands().run (id, {}, CommandList::Source::palette);
+        core.runFromUser (id, CommandList::Source::palette);
         return id;
     }
 
@@ -331,7 +332,128 @@ private:
 };
 
 //==============================================================================
-class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel
+// A form for any command's settings, built from its list of settings: a
+// popup list for choices, a text box for numbers and names, a checkbox for
+// yes or no. Every control is labelled; Return runs, Escape cancels.
+class SettingsForm : public juce::Component
+{
+public:
+    SettingsForm (AppCore& c, const Command& cmd, std::function<void()> closeIt)
+        : core (c), id (cmd.id), close (std::move (closeIt))
+    {
+        setTitle (cmd.name);
+        about.setText (cmd.description, juce::dontSendNotification);
+        about.setTitle ("About");
+        addAndMakeVisible (about);
+
+        for (auto& a : cmd.args)
+        {
+            Field f;
+            f.spec = a;
+            f.label = std::make_unique<juce::Label> (juce::String(), capitalise (a.name) + (a.unit.isNotEmpty() ? " (" + a.unit + ")" : juce::String()));
+            addAndMakeVisible (*f.label);
+            const auto start = a.currentValue ? a.currentValue() : juce::var();
+            const auto value = ! start.isVoid() && start.toString().isNotEmpty() ? start : a.defaultValue;
+
+            if (a.type == ArgSpec::Type::choice)
+            {
+                auto box = std::make_unique<juce::ComboBox>();
+                auto options = a.choicesNow();
+                for (int i = 0; i < options.size(); ++i) box->addItem (options[i], i + 1);
+                box->setSelectedItemIndex (std::max (0, options.indexOf (value.toString())), juce::dontSendNotification);
+                f.control = std::move (box);
+            }
+            else if (a.type == ArgSpec::Type::boolean)
+            {
+                auto t = std::make_unique<juce::ToggleButton> (capitalise (a.name));
+                t->setToggleState ((bool) value, juce::dontSendNotification);
+                f.control = std::move (t);
+            }
+            else
+            {
+                auto t = std::make_unique<juce::TextEditor>();
+                t->setText (value.toString(), false);
+                t->onReturnKey = [this] { run(); };
+                t->onEscapeKey = [this] { if (close) close(); };
+                f.control = std::move (t);
+            }
+            f.control->setTitle (f.label->getText());
+            f.label->attachToComponent (f.control.get(), false);
+            addAndMakeVisible (*f.control);
+            fields.push_back (std::move (f));
+        }
+
+        ok.setButtonText (cmd.name);
+        ok.onClick = [this] { run(); };
+        cancel.onClick = [this] { if (close) close(); };
+        addAndMakeVisible (ok);
+        addAndMakeVisible (cancel);
+        setSize (480, 140 + 64 * (int) fields.size());
+    }
+
+    void parentHierarchyChanged() override
+    {
+        juce::Component::SafePointer<SettingsForm> self (this);
+        juce::MessageManager::callAsync ([self] { if (self != nullptr && self->isShowing() && ! self->fields.empty()) self->fields[0].control->grabKeyboardFocus(); });
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (16);
+        about.setBounds (r.removeFromTop (40));
+        for (auto& f : fields)
+        {
+            r.removeFromTop (24);   // the label sits above its control
+            f.control->setBounds (r.removeFromTop (30));
+            r.removeFromTop (8);
+        }
+        auto buttons = r.removeFromBottom (32);
+        cancel.setBounds (buttons.removeFromRight (100));
+        buttons.removeFromRight (8);
+        ok.setBounds (buttons.removeFromRight (160));
+    }
+
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        if (k == juce::KeyPress::returnKey) { run(); return true; }
+        if (k == juce::KeyPress::escapeKey) { if (close) close(); return true; }
+        return false;
+    }
+
+    CommandArgs values() const
+    {
+        CommandArgs out;
+        for (auto& f : fields)
+        {
+            if (auto* box = dynamic_cast<juce::ComboBox*> (f.control.get())) out.set (f.spec.name, box->getText());
+            else if (auto* t = dynamic_cast<juce::ToggleButton*> (f.control.get())) out.set (f.spec.name, t->getToggleState());
+            else if (auto* e = dynamic_cast<juce::TextEditor*> (f.control.get())) out.set (f.spec.name, e->getText());
+        }
+        return out;
+    }
+
+    void run()
+    {
+        auto args = values();
+        if (close) close();
+        core.commands().run (id, args, CommandList::Source::menu);
+    }
+
+    struct Field { ArgSpec spec; std::unique_ptr<juce::Label> label; std::unique_ptr<juce::Component> control; };
+    std::vector<Field> fields;
+
+private:
+    static juce::String capitalise (const juce::String& s)   { return s.substring (0, 1).toUpperCase() + s.substring (1); }
+
+    AppCore& core;
+    juce::String id;
+    std::function<void()> close;
+    juce::Label about;
+    juce::TextButton ok, cancel { "Cancel" };
+};
+
+//==============================================================================
+class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel, private juce::Timer
 {
 public:
     MainComponent (AppCore& c, ScreenReaderOutput& out) : core (c), router (c), output (out)
@@ -343,6 +465,20 @@ public:
         addAndMakeVisible (status);
         out.onText = [this] (const juce::String& t) { status.setText (t, juce::dontSendNotification); };
 
+        // For anyone reading the screen: the song, where it is, what capture
+        // is doing. Not in the keyboard order; the same facts are a key away
+        // as spoken reports, so a screen reader isn't read the clock.
+        for (auto* l : { &songLine, &transportInfo, &captureInfo })
+        {
+            l->setJustificationType (juce::Justification::centredLeft);
+            l->setWantsKeyboardFocus (false);
+            addAndMakeVisible (*l);
+        }
+        songLine.setTitle ("Song");
+        transportInfo.setTitle ("Transport");
+        captureInfo.setTitle ("Capture");
+        startTimerHz (10);
+
         tracks.setTitle ("Tracks");
         tracks.setDescription ("Up and down move between tracks.");
         tracks.setModel (this);
@@ -351,6 +487,7 @@ public:
         addAndMakeVisible (tracks);
 
         core.onSongChanged = [this] { refresh(); };
+        core.onSettingsNeeded = [this] (const Command& c) { showSettings (c); };
         registerWindowCommands();
         setWantsKeyboardFocus (true);
         setSize (900, 600);
@@ -364,10 +501,29 @@ public:
 
     void resized() override
     {
+        const float s = core.textScale;
+        songLine.setFont (juce::FontOptions (26.0f * s, juce::Font::bold));
+        transportInfo.setFont (juce::FontOptions (18.0f * s));
+        captureInfo.setFont (juce::FontOptions (16.0f * s));
+        status.setFont (juce::FontOptions (16.0f * s));
+        tracks.setRowHeight (juce::roundToInt (30 * s));
+
         auto r = getLocalBounds().reduced (12);
-        status.setBounds (r.removeFromBottom (32));
+        songLine.setBounds (r.removeFromTop (juce::roundToInt (36 * s)));
+        transportInfo.setBounds (r.removeFromTop (juce::roundToInt (28 * s)));
+        captureInfo.setBounds (r.removeFromTop (juce::roundToInt (24 * s)));
+        r.removeFromTop (8);
+        status.setBounds (r.removeFromBottom (juce::roundToInt (32 * s)));
         r.removeFromBottom (8);
         tracks.setBounds (r);
+    }
+
+    void timerCallback() override
+    {
+        songLine.setText (core.session() ? core.session()->getName() + (core.session()->looksUnsaved() ? "  (not saved)" : "")
+                                         : juce::String ("No song open"), juce::dontSendNotification);
+        transportInfo.setText (core.transportLine(), juce::dontSendNotification);
+        captureInfo.setText (core.captureLine(), juce::dontSendNotification);
     }
 
     void paint (juce::Graphics& g) override
@@ -378,6 +534,7 @@ public:
     void refresh()
     {
         output.screenChanged();
+        resized();
         tracks.updateContent();
         if (auto* s = core.session())
         {
@@ -405,7 +562,7 @@ public:
     // every menu item says its key. Toggles are ticked.
     juce::StringArray getMenuBarNames() override
     {
-        return { "File", "Edit", "Transport", "Capture", "Tracks", "Reports", "Speech", "Help" };
+        return { "File", "Edit", "Transport", "Capture", "Tracks", "Audio", "View", "Reports", "Speech", "Help" };
     }
 
     juce::PopupMenu getMenuForIndex (int, const juce::String& menuName) override
@@ -435,7 +592,7 @@ public:
     {
         auto it = menuIds.find (itemId);
         if (it != menuIds.end())
-            core.commands().run (it->second, {}, CommandList::Source::menu);
+            core.runFromUser (it->second, CommandList::Source::menu);
     }
 
     void showPalette()
@@ -458,11 +615,31 @@ public:
         paletteWindow = o.launchAsync();
     }
 
+    void showSettings (const Command& c)
+    {
+        auto* f = new SettingsForm (core, c, [this]
+        {
+            output.screenChanged();
+            if (settingsWindow) settingsWindow->exitModalState (0);
+        });
+        lastSettingsForm = f;
+        if (! showDialogs) return;   // the self-test drives the form without a window
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (f);
+        o.dialogTitle = c.name;
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        settingsWindow = o.launchAsync();
+    }
+
+    bool showDialogs = true;
+    SettingsForm* lastSettingsForm = nullptr;     // for the self-test (owned by its window, or leaked to the test)
+    juce::Component::SafePointer<juce::DialogWindow> settingsWindow;
     Palette* palette = nullptr;          // for the self-test
     juce::Component::SafePointer<juce::DialogWindow> paletteWindow;
     KeyRouter router;
     juce::ListBox tracks;
-    juce::Label status;
+    juce::Label status, songLine, transportInfo, captureInfo;
 
     juce::Array<tracktion::AudioTrack*> tracksList() const
     {
@@ -483,6 +660,7 @@ public:
     {
         if (selected) g.fillAll (findColour (juce::ListBox::backgroundColourId).contrasting (0.2f));
         g.setColour (findColour (juce::ListBox::textColourId));
+        g.setFont (juce::FontOptions (17.0f * core.textScale));
         g.drawText (trackText (row), 8, 0, w - 16, h, juce::Justification::centredLeft, true);
     }
     juce::String getNameForRow (int row) override   { return trackText (row); }

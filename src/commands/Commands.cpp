@@ -52,7 +52,7 @@ juce::Result CommandList::add (Command c)
     if (c.name.isEmpty() || c.run == nullptr)
         return juce::Result::fail ("The command " + c.id + " needs a name and something to run.");
     for (auto& a : c.args)
-        if (a.type == ArgSpec::Type::choice && ! a.choices.contains (a.defaultValue.toString()))
+        if (a.type == ArgSpec::Type::choice && a.liveChoices == nullptr && ! a.choices.contains (a.defaultValue.toString()))
             return juce::Result::fail ("The default for " + a.name + " in " + c.id + " isn't one of its choices.");
     commands.emplace (c.id, std::move (c));
     return juce::Result::ok();
@@ -193,9 +193,13 @@ juce::Result CommandList::checkArgs (const Command& c, const CommandArgs& given,
                                  : juce::var ((bool) v);
                 break;
             case ArgSpec::Type::choice:
-                if (! a.choices.contains (v.toString()))
-                    return juce::Result::fail (capitalised (a.name) + " for " + c.name + " has to be one of: " + a.choices.joinIntoString (", ") + ".");
+            {
+                auto options = a.choicesNow();
+                if (! options.contains (v.toString()))
+                    return juce::Result::fail (options.isEmpty() ? "There's nothing to choose from for " + a.name + " right now."
+                                                                 : capitalised (a.name) + " for " + c.name + " has to be one of: " + options.joinIntoString (", ") + ".");
                 break;
+            }
             case ArgSpec::Type::text:
                 v = v.toString();
                 break;

@@ -104,6 +104,9 @@ public:
 
     // Waits for everything pushed so far to reach disk, then stops the writers.
     void stop();
+    // Keep the raw capture on disk when this recorder goes away (it becomes
+    // recovered audio), instead of deleting it.
+    void keepFilesOnClose()             { options.deleteOnClose = false; }
 
     int64_t getPushedSamples() const    { return pushedPos.load(); }
     int64_t getWrittenSamples() const   { return writtenPos.load(); }

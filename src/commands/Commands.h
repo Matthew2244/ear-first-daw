@@ -40,6 +40,9 @@ struct ArgSpec
     juce::var defaultValue;
     double minimum = -1.0e300, maximum = 1.0e300;   // number and integer
     juce::StringArray choices;                     // choice
+    std::function<juce::StringArray()> liveChoices; // choice, when the list changes (devices plugged in now)
+    juce::StringArray choicesNow() const           { return liveChoices != nullptr ? liveChoices() : choices; }
+    std::function<juce::var()> currentValue;       // what a form starts on: the device in use now, say
     juce::String unit;                             // spoken after a value: "dB", "beats"
 };
 
@@ -73,6 +76,7 @@ struct Command
     std::vector<ArgSpec> args;
     bool undoable = false;      // wraps the run in an undo step
     bool isReport = false;      // only answers a question; never changes anything
+    bool askForSettings = false;// from a menu or the palette, show a form for its settings first
 
     std::function<CommandResult (const CommandArgs&)> run;
     std::function<Availability()> available;            // optional; default always available

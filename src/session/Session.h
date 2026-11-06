@@ -51,6 +51,8 @@ public:
     juce::File markerFile() const       { return folder.getChildFile (".open"); }
 
     bool hasUnsavedChanges() const;
+    // Cheap enough for a screen that updates ten times a second; may lag a change by a moment.
+    bool looksUnsaved() const          { return openedFromAutosave || edit->hasChangedSinceSaved(); }
 
     // Saves now. Returns what to say: "Saved." or why it couldn't.
     juce::String save();

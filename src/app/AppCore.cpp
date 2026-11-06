@@ -67,6 +67,12 @@ AppCore::AppCore (SpeechOutput& out, Options o)
             else run.deleteRecursively();
         engine.getDeviceManager().initialise (1024, 2);
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
+        capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
+        {
+            lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
+            setAsideNote = "The " + juce::String (secs < 90 ? juce::roundToInt (secs) : juce::roundToInt (secs / 60.0))
+                           + (secs < 90 ? " seconds" : " minutes") + " captured before the switch are kept. Keep recovered audio saves them.";
+        };
     }
 
     updates = Updater::createForThisPlatform ({});
@@ -78,6 +84,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
 
     registerCommands();
     setDefaultKeys();
+    if (options.openAudioDevice) loadAppSettings();   // the self-test starts from defaults
 
     juce::StringArray moved;
     if (auto f = keymapFile(); f.existsAsFile())
@@ -116,6 +123,24 @@ juce::String AppCore::startupSentence() const
 juce::File AppCore::keymapFile() const
 {
     return appDataFolder().getChildFile ("Keys.json");
+}
+
+void AppCore::saveAppSettings()
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("textScale", textScale);
+    o->setProperty ("waitForGaps", speaker.settings.waitForGaps);
+    auto f = appDataFolder().getChildFile ("App.json");
+    f.getParentDirectory().createDirectory();
+    f.replaceWithText (juce::JSON::toString (juce::var (o)));
+}
+
+void AppCore::loadAppSettings()
+{
+    auto v = juce::JSON::parse (appDataFolder().getChildFile ("App.json"));
+    if (! v.isObject()) return;
+    textScale = juce::jlimit (0.75f, 3.0f, (float) (double) v.getProperty ("textScale", 1.0));
+    speaker.settings.waitForGaps = (bool) v.getProperty ("waitForGaps", true);
 }
 
 void AppCore::saveKeymap()
@@ -157,6 +182,95 @@ void AppCore::timerCallback()
         lastAutosave = now;
         song->autosaveIfNeeded();
     }
+}
+
+//==============================================================================
+CommandResult AppCore::runFromUser (const juce::String& id, CommandList::Source source)
+{
+    if (auto* c = commandList.find (id); c != nullptr && c->askForSettings && ! c->args.empty() && onSettingsNeeded)
+    {
+        if (c->available)
+            if (auto a = c->available(); ! a.enabled)
+                return commandList.run (id, {}, source);   // says why it can't run
+        onSettingsNeeded (*c);
+        return CommandResult::done();
+    }
+    return commandList.run (id, {}, source);
+}
+
+//==============================================================================
+juce::StringArray AppCore::inputDeviceNames() const
+{
+    if (auto* t = const_cast<tracktion::Engine&> (engine).getDeviceManager().deviceManager.getCurrentDeviceTypeObject())
+    {
+        t->scanForDevices();
+        return t->getDeviceNames (true);
+    }
+    return {};
+}
+
+juce::StringArray AppCore::outputDeviceNames() const
+{
+    if (auto* t = const_cast<tracktion::Engine&> (engine).getDeviceManager().deviceManager.getCurrentDeviceTypeObject())
+    {
+        t->scanForDevices();
+        return t->getDeviceNames (false);
+    }
+    return {};
+}
+
+juce::String AppCore::audioSentence() const
+{
+    auto& jdm = const_cast<tracktion::Engine&> (engine).getDeviceManager().deviceManager;
+    auto* dev = jdm.getCurrentAudioDevice();
+    if (dev == nullptr) return "No audio interface is open.";
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    jdm.getAudioDeviceSetup (setup);
+    const int ins = dev->getActiveInputChannels().countNumberOfSetBits();
+    const int outs = dev->getActiveOutputChannels().countNumberOfSetBits();
+    const auto rate = dev->getCurrentSampleRate();
+    const int buf = dev->getCurrentBufferSizeSamples();
+    juce::String s;
+    if (setup.inputDeviceName.isNotEmpty())
+        s << "Recording from " << setup.inputDeviceName << ", " << ins << (ins == 1 ? " input" : " inputs") << ". ";
+    else
+        s << "No input is open. ";
+    s << "Playing through " << (setup.outputDeviceName.isNotEmpty() ? setup.outputDeviceName : juce::String ("nothing"))
+      << (outs > 0 ? ", " + juce::String (outs) + " outputs" : juce::String()) << ". "
+      << juce::String (rate / 1000.0, rate == std::floor (rate / 1000.0) * 1000.0 ? 0 : 1) << " kilohertz, buffer "
+      << buf << " samples, about " << juce::String (buf * 1000.0 / rate, 1) << " milliseconds.";
+    return s;
+}
+
+juce::String AppCore::setAudio (const juce::String& input, const juce::String& output, double rate, int buffer)
+{
+    auto& jdm = engine.getDeviceManager().deviceManager;
+    if (jdm.getCurrentDeviceTypeObject() == nullptr)
+        return "There's no audio system to set up.";
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    jdm.getAudioDeviceSetup (setup);
+    if (input.isNotEmpty())
+    {
+        setup.inputDeviceName = input;
+        setup.useDefaultInputChannels = false;
+        setup.inputChannels.clear();
+        setup.inputChannels.setRange (0, 1024, true);   // every input the interface has
+    }
+    if (output.isNotEmpty())
+    {
+        setup.outputDeviceName = output;
+        setup.useDefaultOutputChannels = true;
+    }
+    if (rate > 0) setup.sampleRate = rate;
+    if (buffer > 0) setup.bufferSize = buffer;
+    setAsideNote.clear();
+    auto err = jdm.setAudioDeviceSetup (setup, true);
+    engine.getDeviceManager().dispatchPendingUpdates();
+    if (err.isNotEmpty())
+        return "That didn't work: " + err.trimCharactersAtEnd (".") + ".";
+    auto s = audioSentence();
+    if (setAsideNote.isNotEmpty()) s << " " << setAsideNote;
+    return s;
 }
 
 //==============================================================================
@@ -211,6 +325,29 @@ juce::String AppCore::closeSong()
     return "Closed " + name + ".";
 }
 
+juce::String AppCore::transportLine() const
+{
+    if (song == nullptr) return "No song open";
+    auto& t = song->getEdit().getTransport();
+    auto pos = t.getPosition();
+    auto bb = song->getEdit().tempoSequence.toBarsAndBeats (pos);
+    const int secs = (int) pos.inSeconds();
+    return juce::String (t.isPlaying() ? "Playing" : "Stopped") + "   Bar " + juce::String (bb.bars + 1) + ", beat "
+           + juce::String (bb.getWholeBeats() + 1) + "   " + juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2)
+           + (t.looping.get() ? "   Loop on" : "") + (song->getEdit().clickTrackEnabled.get() ? "   Click on" : "");
+}
+
+juce::String AppCore::captureLine() const
+{
+    if (capture == nullptr || capture->getRecorder() == nullptr) return "Not capturing: no inputs open";
+    auto* r = capture->getRecorder();
+    const auto secs = (double) r->getPushedSamples() / std::max (1.0, r->getStore().getInfo().sampleRate);
+    const int n = r->getStore().getInfo().numInputs();
+    juce::String len = secs < 60 ? juce::String ((int) secs) + " s" : juce::String ((int) (secs / 60)) + " min";
+    return "Capturing " + juce::String (n) + (n == 1 ? " input" : " inputs") + ", " + len
+           + (r->getDroppedSamples() > 0 ? ", some audio dropped" : ", nothing dropped");
+}
+
 juce::String AppCore::positionSentence() const
 {
     if (song == nullptr) return "No song is open.";
@@ -239,6 +376,12 @@ void AppCore::registerCommands()
         c.args = { textArg ("name", "Untitled") };
         c.tags = { "create", "project", "session" };
         c.run = [this] (const CommandArgs& a) { auto s = newSong (a["name"].toString()); return song ? CommandResult::done (s) : CommandResult::failed (s); };
+        add (c);
+
+        // The same, asking for the name first. Command-N stays instant.
+        c.id = "file.new-song-named"; c.name = "New Song with a name";
+        c.description = "Asks for the song's name, then makes it in its own folder.";
+        c.askForSettings = true;
         add (c);
     }
     {
@@ -499,6 +642,99 @@ void AppCore::registerCommands()
         add (c);
     }
 
+    // Audio interface
+    {
+        Command c; c.id = "audio.report"; c.name = "Audio interface"; c.category = "Audio"; c.isReport = true;
+        c.description = "Says which interface you're recording from and playing through, the sample rate and the buffer.";
+        c.tags = { "device", "sound card", "sample rate", "buffer", "latency" };
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (audioSentence()); };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.choose-input"; c.name = "Record from"; c.category = "Audio";
+        c.description = "Chooses the interface to record from. Every input on it is captured.";
+        c.tags = { "input", "device", "interface", "sound card", "microphone" };
+        ArgSpec a; a.name = "interface"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this] { return inputDeviceNames(); };
+        a.currentValue = [this] { juce::AudioDeviceManager::AudioDeviceSetup s; engine.getDeviceManager().deviceManager.getAudioDeviceSetup (s); return juce::var (s.inputDeviceName); };
+        a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this] { return inputDeviceNames().isEmpty() ? Availability::no ("No audio interfaces are available.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto s = setAudio (args["interface"].toString(), {}, 0, 0);
+            return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.choose-output"; c.name = "Play through"; c.category = "Audio";
+        c.description = "Chooses the interface or speakers you hear the song through.";
+        c.tags = { "output", "device", "speakers", "headphones", "sound card" };
+        ArgSpec a; a.name = "interface"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this] { return outputDeviceNames(); };
+        a.currentValue = [this] { juce::AudioDeviceManager::AudioDeviceSetup s; engine.getDeviceManager().deviceManager.getAudioDeviceSetup (s); return juce::var (s.outputDeviceName); };
+        a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this] { return outputDeviceNames().isEmpty() ? Availability::no ("No audio outputs are available.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto s = setAudio ({}, args["interface"].toString(), 0, 0);
+            return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.sample-rate"; c.name = "Sample rate"; c.category = "Audio";
+        c.description = "Sets the sample rate. Capture starts a new run at the new rate; nothing captured is lost.";
+        c.tags = { "khz", "hertz", "quality" };
+        ArgSpec a; a.name = "rate"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this]
+        {
+            juce::StringArray out;
+            if (auto* d = engine.getDeviceManager().deviceManager.getCurrentAudioDevice())
+                for (auto r : d->getAvailableSampleRates()) out.add (juce::String ((int) r));
+            return out;
+        };
+        a.defaultValue = "48000"; a.unit = "hertz";
+        a.currentValue = [this] { auto* d = engine.getDeviceManager().deviceManager.getCurrentAudioDevice(); return d ? juce::var (juce::String ((int) d->getCurrentSampleRate())) : juce::var(); };
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this] { return engine.getDeviceManager().deviceManager.getCurrentAudioDevice() == nullptr ? Availability::no ("No audio interface is open.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto s = setAudio ({}, {}, args["rate"].toString().getDoubleValue(), 0);
+            return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "audio.buffer-size"; c.name = "Buffer size"; c.category = "Audio";
+        c.description = "Sets the buffer. Smaller is quicker to hear yourself; larger is safer with heavy sessions.";
+        c.tags = { "latency", "delay", "block size" };
+        ArgSpec a; a.name = "samples"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this]
+        {
+            juce::StringArray out;
+            if (auto* d = engine.getDeviceManager().deviceManager.getCurrentAudioDevice())
+                for (auto b : d->getAvailableBufferSizes()) out.add (juce::String (b));
+            return out;
+        };
+        a.defaultValue = "256";
+        a.currentValue = [this] { auto* d = engine.getDeviceManager().deviceManager.getCurrentAudioDevice(); return d ? juce::var (juce::String (d->getCurrentBufferSizeSamples())) : juce::var(); };
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this] { return engine.getDeviceManager().deviceManager.getCurrentAudioDevice() == nullptr ? Availability::no ("No audio interface is open.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto s = setAudio ({}, {}, 0, args["samples"].toString().getIntValue());
+            return s.startsWith ("That didn't") ? CommandResult::failed (s) : CommandResult::done (s);
+        };
+        add (c);
+    }
+
     // Speech
     {
         Command c; c.id = "speech.say-again"; c.name = "Say that again"; c.category = "Speech"; c.isReport = true;
@@ -538,7 +774,32 @@ void AppCore::registerCommands()
         Command c; c.id = "speech.wait-for-gaps"; c.name = "Wait for gaps"; c.category = "Speech";
         c.description = "While the song plays, holds messages until a quiet moment in the music. Urgent ones always cut in.";
         c.toggleState = [this] { return std::optional<bool> (speaker.settings.waitForGaps); };
-        c.run = [this] (const CommandArgs&) { speaker.settings.waitForGaps = ! speaker.settings.waitForGaps; return CommandResult::done(); };
+        c.run = [this] (const CommandArgs&) { speaker.settings.waitForGaps = ! speaker.settings.waitForGaps; saveAppSettings(); return CommandResult::done(); };
+        add (c);
+    }
+
+    // View
+    {
+        Command c; c.id = "view.bigger-text"; c.name = "Bigger text"; c.category = "View";
+        c.description = "Makes everything on screen larger.";
+        c.tags = { "zoom", "font", "size", "low vision" };
+        c.run = [this] (const CommandArgs&)
+        {
+            textScale = juce::jmin (3.0f, textScale + 0.25f);
+            saveAppSettings();
+            if (onSongChanged) onSongChanged();
+            return CommandResult::done ("Text " + juce::String (juce::roundToInt (textScale * 100)) + " percent.");
+        };
+        add (c);
+        c.id = "view.smaller-text"; c.name = "Smaller text";
+        c.description = "Makes everything on screen smaller.";
+        c.run = [this] (const CommandArgs&)
+        {
+            textScale = juce::jmax (0.75f, textScale - 0.25f);
+            saveAppSettings();
+            if (onSongChanged) onSongChanged();
+            return CommandResult::done ("Text " + juce::String (juce::roundToInt (textScale * 100)) + " percent.");
+        };
         add (c);
     }
 
@@ -596,6 +857,10 @@ void AppCore::setDefaultKeys()
         // commands for control surfaces and the palette.
         k ("Primary+Shift+L", "report.position"),
         k ("Primary+Shift+I", "report.song"),
+        k ("Primary+Shift+A", "audio.report"),
+        k ("Primary+Comma", "audio.choose-input"),
+        k ("Primary+=", "view.bigger-text"),
+        k ("Primary+-", "view.smaller-text"),
         k ("Primary+Shift+R", "speech.say-again"),
         k ("Primary+Shift+Comma", "speech.previous-message"),
         k ("Primary+Shift+Period", "speech.next-message"),

@@ -33,7 +33,7 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -A x64   # whichever Visual Studio the runner has
 
       - name: Build
         run: cmake --build build --config Release --parallel

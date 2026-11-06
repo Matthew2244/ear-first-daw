@@ -48,6 +48,10 @@ public:
     Kept keepLast (double seconds, const juce::File& takesFolder);
 
     CaptureRecorder* getRecorder()          { return recorder.get(); }
+
+    // The interface changed: what was captured on the old one is kept on
+    // disk, never thrown away, and handed over here (folder, seconds).
+    std::function<void (const juce::File&, double)> onCaptureSetAside;
     TimelineMap& getTimelineMap()           { return map; }
 
 private:

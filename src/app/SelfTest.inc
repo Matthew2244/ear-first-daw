@@ -151,6 +151,31 @@ int runSelfTest()
     stCheck (core->session() != nullptr && last().startsWith ("Opened Untitled, 2 tracks."), "opening it again: \"" + last() + "\"");
 
     stSay ("");
+    stSay ("Forms for commands with settings");
+    mc->showDialogs = false;
+    mc->lastSettingsForm = nullptr;
+    core->runFromUser ("file.new-song-named", CommandList::Source::menu);
+    {
+        std::unique_ptr<SettingsForm> form (mc->lastSettingsForm);
+        stCheck (form != nullptr && form->fields.size() == 1 && form->fields[0].control->getTitle() == "Name",
+                 "New Song with a name opens a form with a labelled Name box.");
+        if (form != nullptr)
+        {
+            if (auto* e = dynamic_cast<juce::TextEditor*> (form->fields[0].control.get())) e->setText ("Morning Sketch", false);
+            core->session()->save();
+            form->run();
+            stCheck (core->session() != nullptr && core->session()->getName() == "Morning Sketch", "typing a name and pressing Return makes the song with that name: \"" + last() + "\"");
+        }
+    }
+    core->commands().run ("audio.report");
+    stCheck (last() == "No audio interface is open.", "with no interface open, Audio interface says so.");
+    mc->lastSettingsForm = nullptr;
+    core->runFromUser ("audio.choose-input", CommandList::Source::menu);
+    std::unique_ptr<SettingsForm> deviceForm (mc->lastSettingsForm);
+    stCheck (last().startsWith ("No audio interfaces are available") || deviceForm != nullptr,
+             "Record from either says why it can't, or opens its form: \"" + last() + "\"");
+
+    stSay ("");
     stSay ("Updates");
     core->commands().run ("app.check-for-updates");
     stCheck (last().contains ("version"), "Check for Updates says honestly where things stand: \"" + last() + "\"");
