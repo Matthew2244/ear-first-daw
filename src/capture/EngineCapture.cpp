@@ -1,4 +1,5 @@
 #include "capture/EngineCapture.h"
+#include "session/Tracks.h"
 
 namespace earfirst
 {
@@ -275,11 +276,11 @@ void EngineCapture::placeMidi (Kept& k, TimePosition at, TimeDuration length, in
 
         // The device's own track, made the first time it plays.
         AudioTrack* track = nullptr;
-        for (auto* t : getAudioTracks (*edit))
+        for (auto* t : contentTracks (*edit))
             if (t->getName() == device) track = t;
         if (track == nullptr)
         {
-            auto all = getAudioTracks (*edit);
+            auto all = contentTracks (*edit);
             auto t = edit->insertNewAudioTrack (TrackInsertPoint (nullptr, all.isEmpty() ? nullptr : all.getLast()), nullptr);
             if (t == nullptr) continue;
             t->setName (device);
@@ -311,8 +312,8 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
     if (! k.take.ok()) { k.sentence = k.take.error; return k; }
 
     const auto latency = engine.getDeviceManager().getRecordAdjustmentSamples();
-    edit->ensureNumberOfAudioTracks (numInputs);
-    auto tracks = getAudioTracks (*edit);
+    ensureContentTracks (*edit, numInputs);
+    auto tracks = contentTracks (*edit);
     for (int i = 0; i < numInputs && i < tracks.size(); ++i)
         if (tracks[i]->getName().startsWith ("Track ") || tracks[i]->getName().isEmpty())
             tracks[i]->setName (inputNames[i]);

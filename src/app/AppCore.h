@@ -56,6 +56,16 @@ public:
 
     // The audio interface.
     juce::String audioSentence() const;
+    // The click and the song's tempo.
+    class ClickPlugin* clickPlugin() const;
+    tracktion::AudioTrack* clickTrack() const;
+    void ensureClickTrack();
+    bool clickIsOn() const;
+    juce::String clickSentence() const;
+    juce::String tempoSentence() const;
+    void playFromHere();   // with the click's count-in, if it has one
+    void syncCountIn();
+    tracktion::TimePosition countInStart (tracktion::TimePosition from, int bars) const;
     // Short lines for the screen: what's playing and what capture is doing.
     juce::String transportLine() const;
     juce::String captureLine() const;

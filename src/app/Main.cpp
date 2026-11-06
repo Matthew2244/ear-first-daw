@@ -9,6 +9,7 @@
 
 #include <JuceHeader.h>
 #include "app/AppCore.h"
+#include "session/Tracks.h"
 #include <iostream>
 
 using namespace earfirst;
@@ -588,7 +589,7 @@ public:
     // every menu item says its key. Toggles are ticked.
     juce::StringArray getMenuBarNames() override
     {
-        return { "File", "Edit", "Transport", "Capture", "Tracks", "Audio", "View", "Reports", "Speech", "Help" };
+        return { "File", "Edit", "Transport", "Click", "Song", "Capture", "Tracks", "Audio", "View", "Reports", "Speech", "Help" };
     }
 
     juce::PopupMenu getMenuForIndex (int, const juce::String& menuName) override
@@ -669,7 +670,7 @@ public:
 
     juce::Array<tracktion::AudioTrack*> tracksList() const
     {
-        if (auto* s = core.session()) return tracktion::getAudioTracks (s->getEdit());
+        if (auto* s = core.session()) return contentTracks (s->getEdit());
         return {};
     }
 

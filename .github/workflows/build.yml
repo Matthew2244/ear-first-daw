@@ -46,7 +46,7 @@ jobs:
           set -o pipefail
           ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
           failed=0
-          for t in commands-test speech-test session-test capture-recorder-test capture-engine-test ear-first-selftest; do
+          for t in commands-test speech-test session-test click-test capture-recorder-test capture-engine-test ear-first-selftest; do
             echo "=== $t"
             if ! "build/${t}_artefacts/Release/${t}${ext}"; then
               echo "$t failed."

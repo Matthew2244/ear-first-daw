@@ -13,11 +13,13 @@ The idea: every input you have is recorded all the time, whether the song is pla
 - **Speech.** Urgent messages cut in. The rest wait for a gap in the music, and never longer than a few seconds. Repeated updates on the same thing replace each other. You can step back through everything that's been said.
 - **Songs.** A song is a folder. Saving can't leave a half-written file, songs autosave, and after a crash the next open says what it found and recovered.
 - **The app.** A window whose menus come from the command list, key help (Command-slash: press a key to hear what it does), Find a command (Command-Shift-P), and announcements through VoiceOver on the Mac. Choose the interface you record from and play through, with the sample rate and buffer. Any command with settings gets a form. The window shows the song, the transport and capture at a glance, with bigger and smaller text.
+- **The click.** Its own track, never in a mix, locked to the song's tempo and meter to the sample: different sounds for the one, the beats and subdivisions; any beat loud, normal, soft or silent; eighths, triplets and sixteenths with swing; odd meters; a count-in of one or two bars, and click only during the count-in if you want. One key says how it's set. Tempo and time signature are commands like everything else.
+- **MIDI too.** Every MIDI input is kept all the time on the same clock as the audio, so a keep gets both, lined up, with the sustain pedal where it was.
 - **Updates.** On the Mac, Sparkle looks quietly every few hours and, when a new version is out, the app says so once, in one sentence. Check for Updates opens Sparkle's own window. An update never restarts the app while you're recording or have unsaved work.
 
 ## Not done yet
 
-Windows builds in CI but hasn't been tried with NVDA or JAWS, and Windows updates (WinSparkle) come with the first Windows installer. Playing back and editing takes, mixing, plugins and MIDI are still to come.
+Windows builds in CI but hasn't been tried with NVDA or JAWS, and Windows updates (WinSparkle) come with the first Windows installer. Grooves as the click, a spoken count, editing takes, mixing and plugins are still to come.
 
 ## Building
 
@@ -39,6 +41,8 @@ Every part has a test program that prints one plain sentence per line, so it rea
 - `ear-first-selftest`: the app's own window code, menus, keys, key help and Find a command, driven without showing anything.
 - `capture-recorder-test`: the disk recorder. `capture-recorder-test scale` runs 128 to 1,024 inputs at real speed.
 - `capture-engine-test [block size]`: takes landing on the timeline, including loops, checked against the engine's own recording.
+- `click-test`: the click's timing on its own and in the engine. `click-test listen <folder>` records each click sound for choosing by ear.
+- `test-keyboard`: a pretend MIDI keyboard that plays an exact pattern through the system's MIDI driver.
 - `commands-test`, `speech-test`, `session-test`: the command list and keymap, the speaking layer, and saving and crash recovery.
 - `capture-live "<device name>"`: the recorder on a real interface. Type keep, status or quit.
 

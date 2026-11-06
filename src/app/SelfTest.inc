@@ -72,9 +72,9 @@ int runSelfTest()
     stCheck (mc->tracks.getNumRowsOnScreen() >= 0 && mc->getNumRows() == 1, "the track list shows its one track.");
 
     press (stKey ('c'));
-    stCheck (last() == "Metronome on", "C turns the metronome on: \"" + last() + "\"");
+    stCheck (last() == "Click on", "C turns the click on: \"" + last() + "\"");
     press (stKey ('c'));
-    stCheck (last() == "Metronome off", "and off again.");
+    stCheck (last() == "Click off", "and off again.");
     press (stKey ('l'));
     stCheck (last() == "Loop on", "L turns looping on.");
 
@@ -105,7 +105,7 @@ int runSelfTest()
     press (stKey ('/', cmd));
     stCheck (last() == "Key help on", "Command-slash turns key help on.");
     press (stKey ('c'));
-    stCheck (last().startsWith ("C: Metronome, off.") , "pressing C now says what it does: \"" + last() + "\"");
+    stCheck (last().startsWith ("C: Click, off.") , "pressing C now says what it does: \"" + last() + "\"");
     stCheck (! core->commands().find ("transport.metronome")->toggleState().value_or (true), "and the metronome didn't change.");
     press (stKey ('q'));
     stCheck (last().contains ("does nothing here"), "a key with no command says so: \"" + last() + "\"");
@@ -117,25 +117,72 @@ int runSelfTest()
     {
         Palette p (*core, [] {});
         p.typeIn ("click");
-        stCheck (p.numResults() > 0 && p.resultText (0).startsWith ("Metronome, off, C."), "typing click finds the metronome, with its state and key: \""
+        stCheck (p.numResults() > 0 && p.resultText (0).startsWith ("Click, off, C."), "typing click finds the click, with its state and key: \""
                  + (p.numResults() > 0 ? p.resultText (0) : juce::String ("nothing")) + "\"");
         p.runRow (0);
-        stCheck (last() == "Metronome on", "Return runs it from the list.");
+        stCheck (last() == "Click on", "Return runs it from the list.");
         p.typeIn ("keep");
         stCheck (p.numResults() > 0 && p.resultText (0).startsWith ("Keep, not available now"), "a command that can't run now says so in the list: \""
                  + (p.numResults() > 0 ? p.resultText (0) : juce::String()) + "\"");
         p.typeIn ("zzz");
         stCheck (p.numResults() == 0 && p.summary() == "No commands match.", "nonsense finds nothing, and says so.");
         p.typeIn ("metro");
-        stCheck (p.summary().startsWith ("1 command. Metronome") || p.summary().contains ("First: Metronome"), "the summary says how many and the first: \"" + p.summary() + "\"");
+        stCheck (p.summary().contains ("Click"), "the summary says how many and the first: \"" + p.summary() + "\"");
+    }
+
+    stSay ("");
+    stSay ("The click, tempo and meter");
+    press (stKey ('t', shift));
+    stCheck (last() == "120 beats a minute, 4 4 time.", "Shift-T says the tempo and meter: \"" + last() + "\"");
+    {
+        CommandArgs t; t.set ("beats a minute", 96);
+        core->commands().run ("song.tempo", t);
+        stCheck (last().startsWith ("96 beats a minute"), "setting the tempo to 96 says so: \"" + last() + "\"");
+        CommandArgs m; m.set ("time signature", "7/8");
+        core->commands().run ("song.time-signature", m);
+        stCheck (last() == "96 beats a minute, 7 8 time.", "and the meter to 7/8: \"" + last() + "\"");
+        m.set ("time signature", "7/9");
+        auto r = core->commands().run ("song.time-signature", m);
+        stCheck (! r.ok, "7/9 is refused with a reason: \"" + last() + "\"");
+    }
+    press (stKey ('c', shift));
+    stCheck (last().startsWith ("Click on. 96 beats a minute, 7 8") && last().contains ("the one accented"), "Shift-C sums up the click: \"" + last() + "\"");
+    mc->lastSettingsForm = nullptr;
+    core->runFromUser ("click.settings", CommandList::Source::menu);
+    {
+        std::unique_ptr<SettingsForm> form (mc->lastSettingsForm);
+        stCheck (form != nullptr && form->fields.size() == 9, "Click settings opens a form with nine labelled settings.");
+        CommandArgs a = form != nullptr ? form->values() : CommandArgs();
+        a.set ("subdivision", "eighths"); a.set ("accents", "L N L N L N N"); a.set ("count-in bars", 1);
+        core->commands().run ("click.settings", a);
+        stCheck (last().startsWith ("Click: eighths, accents loud normal loud") && last().contains ("count-in 1 bar"), "changing it says what it's set to: \"" + last() + "\"");
+        a.set ("accents", "LX");
+        auto r = core->commands().run ("click.settings", a);
+        stCheck (! r.ok, "accents with letters it doesn't know are refused: \"" + last() + "\"");
+    }
+    {
+        auto& ts = core->session()->getEdit().tempoSequence;
+        const auto from = ts.toTime (tracktion::BeatPosition::fromBeats (14));
+        const double start = core->countInStart (from, 1).inSeconds();
+        const double expected = ts.toTime (tracktion::BeatPosition::fromBeats (7)).inSeconds();
+        stCheck (std::abs (start - expected) < 0.0001, "a one-bar count-in in 7/8 from bar 3 starts at bar 2, " + juce::String (start, 3)
+                 + " seconds, expected " + juce::String (expected, 3) + ".");
+        // From the very start, a one-bar count-in starts a bar before zero, not cut short.
+        auto& tc = core->session()->getEdit().getTransport();
+        const double oneBar = ts.toTime (tracktion::BeatPosition::fromBeats (7)).inSeconds();
+        tc.setPosition (core->countInStart (tracktion::TimePosition(), 1));
+        stCheck (std::abs (tc.getPosition().inSeconds() + oneBar) < 0.01, "from the very start, the count-in starts a whole bar before zero, at "
+                 + juce::String (tc.getPosition().inSeconds(), 3) + " seconds.");
+        tc.setPosition (tracktion::TimePosition());
     }
 
     stSay ("");
     stSay ("Speech history");
+    const auto lastSaid = last();
     press (stKey ('r', cmd | shift));
-    stCheck (last() == "Metronome on", "Shift-Command-R says the last message again.");
+    stCheck (last() == lastSaid, "Shift-Command-R says the last message again: \"" + last() + "\"");
     press (stKey (',', cmd | shift));
-    stCheck (last().isNotEmpty() && last() != "Metronome on", "Shift-Command-comma steps back: \"" + last() + "\"");
+    stCheck (last().isNotEmpty() && last() != "Click on", "Shift-Command-comma steps back: \"" + last() + "\"");
 
     stSay ("");
     stSay ("Saving, closing, reopening");

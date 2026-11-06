@@ -1,4 +1,6 @@
 #include "app/AppCore.h"
+#include "session/Tracks.h"
+#include "click/ClickPlugin.h"
 
 namespace earfirst
 {
@@ -52,6 +54,8 @@ AppCore::AppCore (SpeechOutput& out, Options o)
       options (std::move (o)),
       speaker (out)
 {
+    engine.getPluginManager().createBuiltInType<ClickPlugin>();
+
     if (options.songsFolder == juce::File())
         options.songsFolder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Ear First Songs");
 
@@ -422,7 +426,8 @@ juce::String AppCore::newSong (const juce::String& name)
     juce::String error;
     song = Session::create (engine, folder, error);
     if (song == nullptr) return error;
-    song->getEdit().ensureNumberOfAudioTracks (1);
+    ensureContentTracks (song->getEdit(), 1);
+    ensureClickTrack();
     song->save();
     if (capture != nullptr) { capture->attachEdit (&song->getEdit()); }
     selectedTrack = 0;
@@ -441,10 +446,13 @@ juce::String AppCore::openSong (const juce::File& folder)
     lastOpenReport.leftoverCaptures.addArray (report.leftoverCaptures);
     lastOpenReport.sentence = report.sentence;
     if (song == nullptr) return error;
+    ensureClickTrack();
+    syncCountIn();
+    song->getEdit().resetChangedStatus();
     if (capture != nullptr) capture->attachEdit (&song->getEdit());
     selectedTrack = 0;
     if (onSongChanged) onSongChanged();
-    auto tracks = getAudioTracks (song->getEdit()).size();
+    auto tracks = contentTracks (song->getEdit()).size();
     juce::String s = "Opened " + song->getName() + ", " + juce::String (tracks) + (tracks == 1 ? " track." : " tracks.");
     if (report.sentence.isNotEmpty()) s << " " << report.sentence;
     return s;
@@ -458,6 +466,104 @@ juce::String AppCore::closeSong()
     song.reset();
     if (onSongChanged) onSongChanged();
     return "Closed " + name + ".";
+}
+
+//==============================================================================
+// The click: its own track, muted when off, never part of a mix.
+ClickPlugin* AppCore::clickPlugin() const
+{
+    if (song == nullptr) return nullptr;
+    for (auto* t : getAudioTracks (song->getEdit()))
+        if (isClickTrack (*t))
+            for (auto* p : t->pluginList)
+                if (auto* c = dynamic_cast<ClickPlugin*> (p)) return c;
+    return nullptr;
+}
+
+AudioTrack* AppCore::clickTrack() const
+{
+    if (song == nullptr) return nullptr;
+    for (auto* t : getAudioTracks (song->getEdit()))
+        if (isClickTrack (*t)) return t;
+    return nullptr;
+}
+
+void AppCore::ensureClickTrack()
+{
+    if (song == nullptr || clickPlugin() != nullptr) return;
+    auto& e = song->getEdit();
+    auto* t = clickTrack();
+    if (t == nullptr)
+    {
+        auto all = getAudioTracks (e);
+        auto added = e.insertNewAudioTrack (TrackInsertPoint (nullptr, all.isEmpty() ? nullptr : all.getLast()), nullptr, false);
+        if (added == nullptr) return;
+        t = added.get();
+        t->state.setProperty ("earFirstRole", "click", nullptr);
+        t->setName ("Click");
+        t->setMute (true);   // off until you turn it on
+    }
+    t->pluginList.insertPlugin (e.getPluginCache().createNewPlugin (ClickPlugin::xmlTypeName, {}), 0, nullptr);
+}
+
+bool AppCore::clickIsOn() const
+{
+    auto* t = clickTrack();
+    return t != nullptr && ! t->isMuted (false);
+}
+
+juce::String AppCore::tempoSentence() const
+{
+    if (song == nullptr) return "No song is open.";
+    auto& ts = song->getEdit().tempoSequence;
+    auto pos = song->getEdit().getTransport().getPosition();
+    auto& sig = ts.getTimeSigAt (pos);
+    const double bpm = ts.getTempoAt (pos).getBpm();
+    return juce::String (bpm, bpm == std::floor (bpm) ? 0 : 1) + " beats a minute, " + juce::String (sig.numerator.get())
+           + " " + juce::String (sig.denominator.get()) + " time.";
+}
+
+juce::String AppCore::clickSentence() const
+{
+    auto* c = clickPlugin();
+    if (c == nullptr) return "No song is open.";
+    auto d = c->getSettings().describe();
+    return juce::String (clickIsOn() ? "Click on. " : "Click off. ") + tempoSentence().upToFirstOccurrenceOf (" time.", true, false)
+           + " " + d.substring (0, 1).toUpperCase() + d.substring (1) + ".";
+}
+
+TimePosition AppCore::countInStart (TimePosition from, int bars) const
+{
+    auto& ts = song->getEdit().tempoSequence;
+    const auto beatsPerBar = (double) ts.getTimeSigAt (from).numerator.get();
+    return ts.toTime (ts.toBeats (from) - BeatDuration::fromBeats (beatsPerBar * bars));
+}
+
+// The engine lets playback start before zero only as far as the song's own
+// count-in setting, so keep that in step with the click's.
+void AppCore::syncCountIn()
+{
+    if (song == nullptr) return;
+    auto* c = clickPlugin();
+    const int bars = c != nullptr ? c->countInBars.get() : 0;
+    song->getEdit().setCountInMode (bars >= 2 ? Edit::CountIn::twoBar : bars == 1 ? Edit::CountIn::oneBar : Edit::CountIn::none);
+}
+
+void AppCore::playFromHere()
+{
+    auto& t = song->getEdit().getTransport();
+    auto* c = clickPlugin();
+    const int bars = c != nullptr ? c->countInBars.get() : 0;
+    const auto from = t.getPosition();
+    if (bars > 0 && c != nullptr)
+    {
+        // Start the given number of bars early; the click knows where the count-in ends.
+        c->countInEndsAt = from.inSeconds();
+        t.setPosition (countInStart (from, bars));
+    }
+    else if (c != nullptr)
+        c->countInEndsAt = -1.0e9;
+    t.play (false);
 }
 
 juce::String AppCore::transportLine() const
@@ -612,7 +718,7 @@ void AppCore::registerCommands()
         c.run = [this] (const CommandArgs&)
         {
             auto& t = song->getEdit().getTransport();
-            if (t.isPlaying()) t.stop (false, false); else t.play (false);
+            if (t.isPlaying()) t.stop (false, false); else playFromHere();
             return CommandResult::done();
         };
         c.name = "Play or stop";
@@ -627,12 +733,128 @@ void AppCore::registerCommands()
         add (c);
     }
     {
-        Command c; c.id = "transport.metronome"; c.name = "Metronome"; c.category = "Transport";
+        Command c; c.id = "transport.metronome"; c.name = "Metronome"; c.category = "Click";
         c.description = "Turns the click on or off.";
-        c.tags = { "click", "count" };
+        c.tags = { "metronome", "click", "count" };
         c.available = needSong;
-        c.toggleState = [this] { return song ? std::optional<bool> (song->getEdit().clickTrackEnabled.get()) : std::optional<bool>(); };
-        c.run = [this] (const CommandArgs&) { auto& e = song->getEdit(); e.clickTrackEnabled = ! e.clickTrackEnabled.get(); return CommandResult::done(); };
+        c.name = "Click";
+        c.toggleState = [this] { return song ? std::optional<bool> (clickIsOn()) : std::optional<bool>(); };
+        c.run = [this] (const CommandArgs&)
+        {
+            ensureClickTrack();
+            if (auto* t = clickTrack()) t->setMute (! t->isMuted (false));
+            return CommandResult::done();
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "click.status"; c.name = "About the click"; c.category = "Click"; c.isReport = true;
+        c.description = "Says whether the click is on, the tempo and meter, and how it's set up.";
+        c.tags = { "metronome", "tempo", "status" };
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (clickSentence()); };
+        add (c);
+    }
+    {
+        Command c; c.id = "click.settings"; c.name = "Click settings"; c.category = "Click";
+        c.description = "Sounds, subdivisions, swing, accents, count-in and level for the click.";
+        c.tags = { "metronome", "count-in", "accent", "subdivision", "swing", "sound" };
+        c.askForSettings = true;
+        c.available = needSong;
+        auto soundArg = [this] (const char* name, std::function<juce::String (ClickPlugin&)> current)
+        {
+            ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.choices = ClickSettings::sounds(); a.defaultValue = "Woodblock";
+            a.currentValue = [this, current] { auto* p = clickPlugin(); return p ? juce::var (current (*p)) : juce::var(); };
+            return a;
+        };
+        ArgSpec sub; sub.name = "subdivision"; sub.type = ArgSpec::Type::choice;
+        sub.choices = { "beats", "eighths", "triplets", "sixteenths" }; sub.defaultValue = "beats";
+        sub.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (juce::StringArray { "beats", "eighths", "triplets", "sixteenths" }[juce::jlimit (1, 4, p->subdivision.get()) - 1]) : juce::var(); };
+        ArgSpec swing = numberArg ("swing", 0, 0, 75, "percent");
+        swing.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (juce::roundToInt (p->swing.get() * 100)) : juce::var(); };
+        ArgSpec accents = textArg ("accents", "");
+        accents.description = "One letter per beat: L loud, N normal, S soft, 0 silent. Empty accents the one.";
+        accents.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (p->accents.get()) : juce::var(); };
+        ArgSpec countIn = numberArg ("count-in bars", 0, 0, 2, "bars"); countIn.type = ArgSpec::Type::integer;
+        countIn.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (p->countInBars.get()) : juce::var(); };
+        ArgSpec only; only.name = "click only during count-in"; only.type = ArgSpec::Type::boolean; only.defaultValue = false;
+        only.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (p->countInOnly.get()) : juce::var(); };
+        ArgSpec lvl = numberArg ("level", 80, 0, 100, "percent");
+        lvl.currentValue = [this] { auto* p = clickPlugin(); return p ? juce::var (juce::roundToInt (p->level.get() * 100)) : juce::var(); };
+        c.args = { soundArg ("one sound", [] (ClickPlugin& p) { return p.barSound.get(); }),
+                   soundArg ("beat sound", [] (ClickPlugin& p) { return p.beatSound.get(); }),
+                   soundArg ("subdivision sound", [] (ClickPlugin& p) { return p.subdivisionSound.get(); }),
+                   sub, swing, accents, countIn, only, lvl };
+        c.undoable = true;
+        c.run = [this] (const CommandArgs& a)
+        {
+            ensureClickTrack();
+            auto* p = clickPlugin();
+            if (p == nullptr) return CommandResult::failed ("The click couldn't be set up.");
+            auto acc = a["accents"].toString().toUpperCase().removeCharacters (" ,");
+            if (! acc.containsOnly ("LNS0")) return CommandResult::failed ("Accents use L, N, S and 0 only, one per beat.");
+            ClickSettings s;
+            s.barSound = a["one sound"].toString(); s.beatSound = a["beat sound"].toString(); s.subdivisionSound = a["subdivision sound"].toString();
+            s.subdivision = juce::StringArray { "beats", "eighths", "triplets", "sixteenths" }.indexOf (a["subdivision"].toString()) + 1;
+            s.swing = (float) (double) a["swing"] / 100.0f; s.accents = acc;
+            s.countInBars = (int) a["count-in bars"]; s.countInOnly = (bool) a["click only during count-in"];
+            s.level = (float) (double) a["level"] / 100.0f;
+            p->setSettings (s);
+            syncCountIn();
+            return CommandResult::done ("Click: " + s.describe() + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "song.tempo"; c.name = "Tempo"; c.category = "Song";
+        c.description = "Sets the tempo where the playhead is.";
+        c.tags = { "bpm", "speed", "metronome" };
+        c.askForSettings = true;
+        c.available = needSong;
+        c.undoable = true;
+        ArgSpec bpm = numberArg ("beats a minute", 120, 20, 400, "");
+        bpm.currentValue = [this] { return song ? juce::var (song->getEdit().tempoSequence.getTempoAt (song->getEdit().getTransport().getPosition()).getBpm()) : juce::var(); };
+        c.args = { bpm };
+        c.run = [this] (const CommandArgs& a)
+        {
+            auto& e = song->getEdit();
+            e.tempoSequence.getTempoAt (e.getTransport().getPosition()).setBpm ((double) a["beats a minute"]);
+            return CommandResult::done (tempoSentence());
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "song.time-signature"; c.name = "Time signature"; c.category = "Song";
+        c.description = "Sets the time signature where the playhead is, written like 7/8.";
+        c.tags = { "meter", "bar", "metronome" };
+        c.askForSettings = true;
+        c.available = needSong;
+        c.undoable = true;
+        ArgSpec sig = textArg ("time signature", "4/4");
+        sig.currentValue = [this]
+        {
+            if (! song) return juce::var();
+            auto& s = song->getEdit().tempoSequence.getTimeSigAt (song->getEdit().getTransport().getPosition());
+            return juce::var (juce::String (s.numerator.get()) + "/" + juce::String (s.denominator.get()));
+        };
+        c.args = { sig };
+        c.run = [this] (const CommandArgs& a)
+        {
+            auto text = a["time signature"].toString().removeCharacters (" ");
+            const int num = text.upToFirstOccurrenceOf ("/", false, false).getIntValue();
+            const int den = text.fromFirstOccurrenceOf ("/", false, false).getIntValue();
+            if (num < 1 || num > 32 || ! juce::isPowerOfTwo (den) || den < 1 || den > 32)
+                return CommandResult::failed ("Write it like 4/4 or 7/8: up to 32 beats, over 1, 2, 4, 8, 16 or 32.");
+            auto& e = song->getEdit();
+            e.tempoSequence.getTimeSigAt (e.getTransport().getPosition()).setStringTimeSig (juce::String (num) + "/" + juce::String (den));
+            return CommandResult::done (tempoSentence());
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "song.tempo-report"; c.name = "Tempo and meter"; c.category = "Reports"; c.isReport = true;
+        c.description = "Says the tempo and time signature where the playhead is.";
+        c.tags = { "bpm", "time signature" };
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (tempoSentence()); };
         add (c);
     }
     {
@@ -728,10 +950,10 @@ void AppCore::registerCommands()
         c.run = [this] (const CommandArgs&)
         {
             auto& e = song->getEdit();
-            auto tracks = getAudioTracks (e);
+            auto tracks = contentTracks (e);
             auto* after = tracks.isEmpty() ? nullptr : tracks[juce::jlimit (0, tracks.size() - 1, selectedTrack)];
             auto t = e.insertNewAudioTrack (TrackInsertPoint (nullptr, after), nullptr);
-            selectedTrack = getAudioTracks (e).indexOf (t.get());
+            selectedTrack = contentTracks (e).indexOf (t.get());
             if (onSongChanged) onSongChanged();
             return CommandResult::done ("Added " + (t ? t->getName() : juce::String ("a track")) + ".");
         };
@@ -739,7 +961,7 @@ void AppCore::registerCommands()
     }
     auto moveTrack = [this] (int delta)
     {
-        auto tracks = getAudioTracks (song->getEdit());
+        auto tracks = contentTracks (song->getEdit());
         if (tracks.isEmpty()) return CommandResult::failed ("There are no tracks.");
         const int next = selectedTrack + delta;
         if (next < 0 || next >= tracks.size())
@@ -778,7 +1000,7 @@ void AppCore::registerCommands()
         c.run = [this] (const CommandArgs&)
         {
             if (song == nullptr) return CommandResult::done ("No song is open.");
-            auto n = getAudioTracks (song->getEdit()).size();
+            auto n = contentTracks (song->getEdit()).size();
             return CommandResult::done (song->getName() + ", " + juce::String (n) + (n == 1 ? " track, " : " tracks, ")
                                         + (song->hasUnsavedChanges() ? "with unsaved changes." : "saved."));
         };
@@ -990,6 +1212,10 @@ void AppCore::setDefaultKeys()
         k ("Home", "transport.go-to-start", "main"),
         k ("W", "transport.go-to-start", "main"),
         k ("C", "transport.metronome", "main"),
+        k ("Shift+C", "click.status", "main"),
+        k ("Primary+Shift+K", "click.settings"),
+        k ("Primary+Shift+T", "song.tempo"),
+        k ("Shift+T", "song.tempo-report", "main"),
         k ("L", "transport.loop", "main"),
         k ("K", "capture.keep", "main"),
         k ("Shift+K", "capture.keep", "main", keep2min),
