@@ -43,3 +43,19 @@ song starts, song never played (goes to the playhead), 64 inputs, and
 looping (every pass kept, the latest full pass on the tracks, the rest kept
 for comping, wraps noted to the sample even mid-block). Passes at block sizes
 64, 256, 1000, 1024 and 4096. Not yet covered: a real interface's latency.
+
+## commands-test
+
+The command list (`src/commands/Commands.*`) and keymap (`src/commands/Keymap.*`).
+Every action is one command with a stable id (`transport.play`), typed
+settings, and its own spoken result; toggles say their new state, a command
+that can't run says why, macros speak once and undo as one step, and repeat
+reruns the last change with its settings. Keys are written once for both
+systems (`Primary+Shift+K` = Command on the Mac, Control on Windows), work in
+scopes that fall through to global, can be two-key sequences, and are stored
+as your changes over versioned defaults, so a new version never moves your
+keys and a moved default is announced once. Keys VoiceOver, NVDA, JAWS or the
+system already use are flagged. Research behind the design is in iCloud, Ear
+First DAW.
+
+    build/commands-test_artefacts/Release/commands-test

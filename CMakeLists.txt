@@ -86,3 +86,12 @@ target_link_libraries(capture-engine-test PRIVATE
 if (APPLE)
     target_compile_options(capture-engine-test PRIVATE "-fno-aligned-allocation")
 endif()
+
+# commands-test: the command list and keymap.
+juce_add_console_app(commands-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(commands-test)
+target_compile_features(commands-test PRIVATE cxx_std_20)
+target_sources(commands-test PRIVATE src/commands_test.cpp src/commands/Commands.cpp src/commands/Keymap.cpp)
+target_include_directories(commands-test PRIVATE src)
+target_compile_definitions(commands-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(commands-test PRIVATE juce::juce_core juce::juce_recommended_config_flags)
