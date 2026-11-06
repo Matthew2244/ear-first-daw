@@ -52,9 +52,9 @@ void MidiCapture::add (const juce::String& device, int64_t sample, const juce::M
         if (index < 0) { deviceNames.add (device); index = deviceNames.size() - 1; newDevice = true; }
         pending.push_back ({ index, Event { sample, m } });
         written[index].push_back (Event { sample, m });
+        if (newDevice) writeIndex();   // under the lock: two devices starting at once can't race
     }
     ++count;
-    if (newDevice) writeIndex();
 }
 
 void MidiCapture::writerLoop()
@@ -71,6 +71,9 @@ void MidiCapture::writerLoop()
 
 void MidiCapture::flushNow()
 {
+    // The writer thread and a keep can both flush; two writers on one file
+    // would overwrite each other's records.
+    std::lock_guard<std::mutex> one (flushLock);
     std::vector<std::pair<int, Event>> batch;
     juce::StringArray names;
     {

@@ -108,6 +108,12 @@ int main (int argc, char** argv)
     t = clickTicks (tempo, { TimePosition(), TimePosition::fromSeconds (2.0) }, s);
     check (t.size() == 4 && t[1].level == 0.0f && t[2].level < t[3].level, "accents L 0 S N: beat two silent, beat three soft.");
 
+    // A count-in before bar 1: the bar before zero clicks, starting on the one.
+    s = ClickSettings();
+    t = clickTicks (tempo, { TimePosition::fromSeconds (-2.0), TimePosition() }, s);
+    check (times (t) == "-2.000 -1.500 -1.000 -0.500" && t[0].kind == ClickTick::Kind::bar && t[1].kind == ClickTick::Kind::beat,
+           "a one-bar count-in before bar 1 clicks four times, the first on the one: " + times (t) + ".");
+
     // Splitting into small blocks must give exactly the same clicks.
     s = ClickSettings(); s.subdivision = 4; s.swing = 0.3f;
     auto whole = clickTicks (tempo, { TimePosition(), TimePosition::fromSeconds (8.0) }, s);
@@ -195,6 +201,24 @@ int main (int argc, char** argv)
         for (int i = 48000 + 2400; i < all.getNumSamples(); ++i) after = std::max (after, std::abs (all.getSample (0, i)));
         check (after < 0.001f, "click only during the count-in: silent after it ends.");
         say ("The click describes itself as: " + click->getSettings().describe() + ".");
+
+        // Settings changed straight on the song's data, the way Undo does,
+        // must reach the sound: turn count-in-only off that way, then listen.
+        click->state.setProperty ("countInOnly", false, nullptr);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        tc.setPosition (TimePosition());
+        tc.play (false);
+        e->dispatchPendingUpdatesSynchronously();
+        all.clear();
+        for (int done = 0; done < all.getNumSamples(); done += 256)
+        {
+            auto out = player->process (256);
+            for (int ch = 0; ch < 2; ++ch) all.copyFrom (ch, done, out, ch, 0, 256);
+        }
+        tc.stop (false, false);
+        float later = 0;
+        for (int i = 48000 + 2400; i < all.getNumSamples(); ++i) later = std::max (later, std::abs (all.getSample (0, i)));
+        check (later > 0.05f, "a change made the way Undo makes it reaches the sound: after the count-in it clicks again.");
         click = nullptr;
         plugin = nullptr;   // let go of the plugin before its song goes
         e.reset();

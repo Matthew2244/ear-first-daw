@@ -63,7 +63,7 @@ private:
     std::map<int, std::vector<Event>> written;      // also kept in memory, for fast keeps
     std::atomic<int64_t> count { 0 };
 
-    std::mutex wakeLock;
+    std::mutex wakeLock, flushLock;
     std::condition_variable wake;
     std::atomic<bool> running { true };
     std::thread writer;

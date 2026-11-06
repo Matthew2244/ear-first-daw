@@ -477,7 +477,10 @@ void CaptureRecorder::checkDisk()
 
     if (freeBytesNow() >= options.diskReserveBytes) { diskFull.store (false); return; }
 
-    std::lock_guard<std::mutex> lock (storeMutex);
+    // A keep may be exporting under this lock; never wait for it here, or the
+    // writers stall and live audio drops. Try again next time round.
+    std::unique_lock<std::mutex> lock (storeMutex, std::try_to_lock);
+    if (! lock.owns_lock()) return;
     auto seg = info.segmentSamples;
     auto oldest = firstAvailable.load() / seg;
     auto current = writtenPos.load() / seg;

@@ -23,43 +23,53 @@ juce::String ClickSettings::describe() const
     return s;
 }
 
-std::vector<ClickTick> clickTicks (const TempoSequence& tempo, TimeRange range, const ClickSettings& s)
+template <typename TempoMap>
+void clickTicks (const TempoMap& tempo, TimeRange range, const ClickSettings& s, std::vector<ClickTick>& out)
 {
-    std::vector<ClickTick> out;
+    out.clear();
     const int sub = juce::jlimit (1, 8, s.subdivision);
+    // Accent letters read without making new strings (this runs on the audio thread).
     auto accentFor = [&] (int beatInBar) -> char
     {
-        auto a = s.accents.removeCharacters (" ,");
-        if (a.isEmpty()) return beatInBar == 0 ? 'L' : 'N';
-        return (char) a[beatInBar % a.length()];
+        int letters = 0;
+        for (auto ch : s.accents) if (ch != ' ' && ch != ',') ++letters;
+        if (letters == 0) return beatInBar == 0 ? 'L' : 'N';
+        int want = beatInBar % letters, n = 0;
+        for (auto ch : s.accents)
+            if (ch != ' ' && ch != ',') { if (n == want) return (char) ch; ++n; }
+        return 'N';
     };
+    const int numeratorAtZero = juce::jmax (1, tempo.toBarsAndBeats (TimePosition()).numerator);
 
     const double b0 = tempo.toBeats (range.getStart()).inBeats();
     const double b1 = tempo.toBeats (range.getEnd()).inBeats();
-    // Ticks are counted on the subdivided beat grid; swing delays the odd ones.
     const double swingDelay = (sub % 2 == 0) ? juce::jlimit (0.0f, 0.75f, s.swing) / sub : 0.0;
     for (auto k = (int64_t) std::floor (b0 * sub) - 1; k <= (int64_t) std::ceil (b1 * sub); ++k)
     {
         double beat = (double) k / sub;
-        const bool onBeat = (k % sub) == 0;
-        if (! onBeat && (k % 2 != 0) && swingDelay > 0) beat += swingDelay;
-        if (beat < 0) continue;
+        const bool onBeat = ((k % sub) + sub) % sub == 0;
+        if (! onBeat && ((k % 2) + 2) % 2 != 0 && swingDelay > 0) beat += swingDelay;
         const auto t = tempo.toTime (BeatPosition::fromBeats (beat));
         if (t < range.getStart() || t >= range.getEnd()) continue;
 
         ClickTick tick { t, ClickTick::Kind::subdivision, s.subdivisionLevel };
         if (onBeat)
         {
-            const auto bb = tempo.toBarsAndBeats (t);
-            const int beatInBar = bb.getWholeBeats();
+            // Before bar 1 (a count-in), count bars back from zero in the
+            // first meter; after it, ask the tempo map.
+            const int wholeBeat = (int) std::llround (beat);
+            const int beatInBar = beat < 0 ? ((wholeBeat % numeratorAtZero) + numeratorAtZero) % numeratorAtZero
+                                           : tempo.toBarsAndBeats (t).getWholeBeats();
             const char a = accentFor (beatInBar);
             tick.kind = beatInBar == 0 ? ClickTick::Kind::bar : ClickTick::Kind::beat;
             tick.level = a == 'L' ? 1.0f : a == 'S' ? 0.4f : a == '0' ? 0.0f : 0.7f;
         }
         out.push_back (tick);
     }
-    return out;
 }
+
+template void clickTicks<TempoSequence> (const TempoSequence&, TimeRange, const ClickSettings&, std::vector<ClickTick>&);
+template void clickTicks<tempo::Sequence> (const tempo::Sequence&, TimeRange, const ClickSettings&, std::vector<ClickTick>&);
 
 //==============================================================================
 const char* ClickPlugin::xmlTypeName = "earFirstClick";
@@ -77,12 +87,37 @@ ClickPlugin::ClickPlugin (PluginCreationInfo info) : Plugin (info)
     level.referTo (state, ids::level, um, 0.8f);
     countInBars.referTo (state, ids::countInBars, um, 0);
     countInOnly.referTo (state, ids::countInOnly, um, false);
-    cached = getSettings();
+
+    // Rebuild what the audio thread reads whenever the click's settings or the
+    // song's tempo and meter change, undo included.
+    state.addListener (&watcher);
+    tempoState = edit.tempoSequence.getState();
+    tempoState.addListener (&watcher);
+    voices.reserve (64);
+    pending.reserve (64);
+    ticks.reserve (512);
+    rebuildSnapshot();
 }
 
 ClickPlugin::~ClickPlugin()
 {
+    cancelPendingUpdate();
+    tempoState.removeListener (&watcher);
+    state.removeListener (&watcher);
     notifyListenersOfDeletion();
+}
+
+void ClickPlugin::rebuildSnapshot()
+{
+    auto s = std::make_shared<Snapshot> (Snapshot { edit.tempoSequence.getInternalSequence(), getSettings() });
+    const auto names = ClickSettings::sounds();
+    s->barSound = std::max (0, names.indexOf (s->settings.barSound));
+    s->beatSound = std::max (0, names.indexOf (s->settings.beatSound));
+    s->subdivisionSound = std::max (0, names.indexOf (s->settings.subdivisionSound));
+    if (snapshot != nullptr) retired.push_back (snapshot);
+    std::atomic_store (&snapshot, std::shared_ptr<const Snapshot> (std::move (s)));
+    // Only the retired list still holds these: safe to free here.
+    retired.erase (std::remove_if (retired.begin(), retired.end(), [] (auto& p) { return p.use_count() == 1; }), retired.end());
 }
 
 ClickSettings ClickPlugin::getSettings() const
@@ -101,17 +136,12 @@ void ClickPlugin::setSettings (const ClickSettings& s)
     subdivisionLevel = juce::jlimit (0.0f, 1.0f, s.subdivisionLevel); barSound = s.barSound; beatSound = s.beatSound;
     subdivisionSound = s.subdivisionSound; level = juce::jlimit (0.0f, 1.0f, s.level);
     countInBars = juce::jlimit (0, 16, s.countInBars); countInOnly = s.countInOnly;
-    const juce::ScopedLock sl (settingsLock);
-    cached = getSettings();
+    rebuildSnapshot();
 }
 
 void ClickPlugin::initialise (const PluginInitialisationInfo&)
 {
     voices.clear();
-    voices.reserve (64);
-    pending.reserve (64);
-    const juce::ScopedLock sl (settingsLock);
-    cached = getSettings();
 }
 
 void ClickPlugin::deinitialise() {}
@@ -185,26 +215,22 @@ void ClickPlugin::applyToBuffer (const PluginRenderContext& rc)
     auto* left = rc.destBuffer->getWritePointer (0, rc.bufferStartSample);
     auto* right = rc.destBuffer->getNumChannels() > 1 ? rc.destBuffer->getWritePointer (1, rc.bufferStartSample) : left;
 
-    ClickSettings s;
-    {
-        const juce::ScopedTryLock sl (settingsLock);
-        if (sl.isLocked()) s = cached; else s = ClickSettings();
-    }
-
+    const auto snap = std::atomic_load (&snapshot);
     pending.clear();
-    if (rc.isPlaying && ! rc.isScrubbing && ! rc.editTime.isEmpty())
+    if (snap != nullptr && rc.isPlaying && ! rc.isScrubbing && ! rc.editTime.isEmpty())
     {
+        const auto& s = snap->settings;
         const double countInEnd = countInEndsAt.load();
-        const auto sounds = ClickSettings::sounds();
-        for (auto& t : clickTicks (edit.tempoSequence, rc.editTime, s))
+        clickTicks (snap->tempo, rc.editTime, s, ticks);
+        for (auto& t : ticks)
         {
             if (t.level <= 0.0f) continue;
             if (s.countInOnly && t.time.inSeconds() >= countInEnd) continue;
-            const auto& name = t.kind == ClickTick::Kind::bar ? s.barSound : t.kind == ClickTick::Kind::beat ? s.beatSound : s.subdivisionSound;
+            const int sound = t.kind == ClickTick::Kind::bar ? snap->barSound : t.kind == ClickTick::Kind::beat ? snap->beatSound : snap->subdivisionSound;
             const double pitch = t.kind == ClickTick::Kind::bar ? 1.5 : t.kind == ClickTick::Kind::beat ? 1.0 : 0.8;
             const int offset = juce::jlimit (0, rc.bufferNumSamples - 1,
                                              (int) std::llround ((t.time - rc.editTime.getStart()).inSeconds() * sampleRate));
-            start (std::max (0, sounds.indexOf (name)), pitch, t.level * s.level, offset);
+            start (sound, pitch, t.level * s.level, offset);
         }
     }
 

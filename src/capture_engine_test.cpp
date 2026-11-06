@@ -238,7 +238,7 @@ void checkPlacement (Engine& engine, earfirst::EngineCapture::Kept& k, int numIn
     }
     check (found, label + ": the click is in every clip (" + juce::String (missing) + " missing).");
     const double samplesOff = worst * sr;
-    check (samplesOff < 0.5, label + ": the click lands at " + juce::String (first, 4) + " seconds on every track, expected "
+    check (first >= 0 && samplesOff < 0.5, label + ": the click lands at " + juce::String (first, 4) + " seconds on every track, expected "
            + juce::String (expected, 4) + ". Off by " + juce::String (samplesOff, 1) + " samples at worst.");
 }
 } // namespace
@@ -396,6 +396,52 @@ int main (int argc, char** argv)
                 say ("  anchor: capture " + juce::String (an.captureSample) + ", timeline " + juce::String (an.editSample)
                      + (an.playing ? ", playing" : ", stopped"));
         }
+    }
+
+    // 6b. After the interface restarts, the new run's clock starts at zero
+    //     again. The timeline map must forget the old run, or a take is placed
+    //     against anchors from before the restart.
+    {
+        say ("");
+        say ("Test 6b: the timeline map after a restart.");
+        earfirst::TimelineMap m;
+        m.note (0, true, 480000);                 // old run: playing from 10 s
+        m.note (960000, true, 1440000);           // and a jump 20 s later
+        m.reset();                                // the device restarts
+        m.note (0, false, 0);                     // new run: stopped for a second
+        m.note (48000, true, 96000);              // then playing from 2 s
+        auto start = m.timelineStartFor (0, 240000);
+        check (start.has_value() && *start == 48000, "Test 6b: a take is lined up by the new run only (timeline sample "
+               + juce::String (start ? *start : -1) + ", expected 48000).");
+        check (m.getAnchors().size() == 2, "Test 6b: the old run's anchors are gone.");
+    }
+
+    // 6c. MIDI survives a crash: written, left on disk, read back in order.
+    {
+        say ("");
+        say ("Test 6c: MIDI left on disk by a crash comes back.");
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("EarFirstMidiRecovery");
+        dir.deleteRecursively();
+        {
+            earfirst::MidiCapture mc (dir, 48000.0, false);
+            for (int i = 0; i < 100; ++i)
+            {
+                mc.add ("Keys", i * 4800, juce::MidiMessage::noteOn (1, 60 + (i % 12), (juce::uint8) 100));
+                mc.add ("Keys", i * 4800 + 2400, juce::MidiMessage::noteOff (1, 60 + (i % 12)));
+            }
+            mc.add ("Pads", 1000, juce::MidiMessage::noteOn (10, 36, (juce::uint8) 127));
+        }   // gone without anyone keeping it, as after a crash
+        auto back = earfirst::MidiCapture::openExisting (dir);
+        check (back != nullptr && back->devices().size() == 2, "Test 6c: both devices are found again.");
+        if (back != nullptr)
+        {
+            auto keys = back->eventsIn ("Keys", std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max());
+            bool ordered = keys.size() == 200;
+            for (size_t i = 1; ordered && i < keys.size(); ++i) ordered = keys[i].sample >= keys[i - 1].sample;
+            check (ordered && keys[10].message.isNoteOn() && keys[10].sample == 5 * 4800,
+                   "Test 6c: all 200 events from the keyboard come back, in order, at the right times.");
+        }
+        dir.deleteRecursively();
     }
 
     // 7. MIDI: a note at 6 seconds, the pedal down at 2, a note held past the end.

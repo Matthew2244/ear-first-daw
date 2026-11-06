@@ -137,6 +137,11 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     if ((recorder != nullptr || midi != nullptr) && rate == sampleRate && newNames == inputNames)
         return;
 
+    // MIDI keeps arriving on its own threads while the device restarts, so
+    // stop listening before the MIDI capture is replaced (a keyboard sending
+    // active sensing would otherwise hit a freed capture).
+    detachMidiTaps();
+
     if (recorder != nullptr)
     {
         // Never lose audio on a switch: keep it on disk as recovered audio.
@@ -150,15 +155,23 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     }
     midi.reset();
     blockStart = 0;
+    map.reset();   // the new run's clock starts at zero; old anchors don't belong to it
     sampleRate = rate;
     numInputs = newNames.size();
     inputNames = newNames;
     deviceBlock = device->getCurrentBufferSizeSamples();
-    const auto runFolder = captureFolder.getChildFile (juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"));
+    // A fresh folder every time: a restart in the same second must never
+    // reuse (and overwrite) a run that was just set aside.
+    const auto runFolder = captureFolder.getNonexistentChildFile (juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"), {}, false);
     if (numInputs == 0)
     {
-        // No audio inputs: MIDI is still kept, on the device's clock.
+        // No audio inputs: MIDI is still kept, on the device's clock. The run
+        // gets a capture.json too, so it's found after a crash.
+        runFolder.createDirectory();
+        CaptureInfo info; info.sampleRate = rate; info.started = juce::Time::getCurrentTime();
+        info.save (runFolder);
         midi = std::make_unique<MidiCapture> (runFolder.getChildFile ("midi"), rate);
+        attachMidiTaps();
         return;
     }
 
@@ -170,6 +183,7 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
     chunk.assign ((size_t) numInputs, nullptr);
     recorder = std::make_unique<CaptureRecorder> (o);
     midi = std::make_unique<MidiCapture> (o.folder.getChildFile ("midi"), rate);
+    attachMidiTaps();
 }
 
 void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, int numIn, float* const* out, int numOut,
@@ -185,6 +199,18 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     // Inputs first, before the engine can touch the buffers.
     capture (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
+    if (onOutputLevel)
+    {
+        // Before the earcon is mixed in, so speech waits for the music, not for itself.
+        float peak = 0;
+        for (int c = 0; c < numOut; ++c)
+            if (out[c] != nullptr)
+            {
+                auto range = juce::FloatVectorOperations::findMinAndMax (out[c], n);
+                peak = std::max ({ peak, std::abs (range.getStart()), std::abs (range.getEnd()) });
+            }
+        onOutputLevel (peak);
+    }
     renderEarcon (out, numOut, n);
     // The clock runs whenever the device does, inputs or not, so MIDI is
     // captured and placed even with no audio inputs open.

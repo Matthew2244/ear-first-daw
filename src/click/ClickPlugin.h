@@ -39,10 +39,21 @@ struct ClickTick
     float level;                     // 0 = silent
 };
 
-// Every tick that falls in [range), in order. Pure, so it's tested directly.
-std::vector<ClickTick> clickTicks (const tracktion::TempoSequence&, tracktion::TimeRange, const ClickSettings&);
+// Every tick that falls in [range), in order, appended to `out`. Works with
+// the edit's tempo sequence or a copy of it (what the audio thread uses).
+// Negative times are counted in too, so a count-in before bar 1 clicks.
+template <typename TempoMap>
+void clickTicks (const TempoMap&, tracktion::TimeRange, const ClickSettings&, std::vector<ClickTick>& out);
 
-class ClickPlugin : public tracktion::Plugin
+template <typename TempoMap>
+std::vector<ClickTick> clickTicks (const TempoMap& t, tracktion::TimeRange r, const ClickSettings& s)
+{
+    std::vector<ClickTick> out;
+    clickTicks (t, r, s, out);
+    return out;
+}
+
+class ClickPlugin : public tracktion::Plugin, private juce::AsyncUpdater
 {
 public:
     ClickPlugin (tracktion::PluginCreationInfo);
@@ -66,6 +77,7 @@ public:
 
     ClickSettings getSettings() const;
     void setSettings (const ClickSettings&);
+    void refreshNow()                                   { rebuildSnapshot(); }   // for tests: don't wait for the message loop
 
     // Set when playing with a count-in: where the count-in ends on the timeline.
     std::atomic<double> countInEndsAt { -1.0e9 };
@@ -80,10 +92,35 @@ private:
     void start (int sound, double pitch, float amp, int offset);
     void render (float* left, float* right, int start, int num);
 
+    // Everything the audio thread needs, made on the message thread whenever
+    // the tempo, the meter or the click's settings change (undo included).
+    // The audio thread only reads it: no locks, no tempo rebuilds, no
+    // allocation there.
+    struct Snapshot
+    {
+        tracktion::tempo::Sequence tempo;
+        ClickSettings settings;
+        int barSound = 0, beatSound = 0, subdivisionSound = 0;
+    };
+    void rebuildSnapshot();
+    void handleAsyncUpdate() override                           { rebuildSnapshot(); }
+    struct Watcher : juce::ValueTree::Listener
+    {
+        explicit Watcher (ClickPlugin& p) : owner (p) {}
+        void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { owner.triggerAsyncUpdate(); }
+        void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override             { owner.triggerAsyncUpdate(); }
+        void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int) override      { owner.triggerAsyncUpdate(); }
+        ClickPlugin& owner;
+    };
+    Watcher watcher { *this };
+
+    std::shared_ptr<const Snapshot> snapshot;
+    std::vector<std::shared_ptr<const Snapshot>> retired;   // freed here on the message thread, never on the audio thread
+    juce::ValueTree tempoState;
+
     std::vector<Voice> voices;
     std::vector<std::pair<int, Voice>> pending;   // voices starting part-way through this block
-    juce::CriticalSection settingsLock;
-    ClickSettings cached;
+    std::vector<ClickTick> ticks;
 };
 
 } // namespace earfirst

@@ -113,6 +113,17 @@ public:
 
     bool hasOverflowed() const      { return overflowed.load(); }
 
+    // A new capture run starts its own clock at zero; the old anchors would
+    // place takes against the wrong run. Call only while the audio is stopped.
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock (readMutex);
+        fifo.reset();
+        anchors.clear();
+        hasLast = false;
+        overflowed = false;
+    }
+
     std::vector<Anchor> getAnchors()
     {
         std::lock_guard<std::mutex> lock (readMutex);

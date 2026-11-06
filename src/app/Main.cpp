@@ -118,9 +118,9 @@ private:
 class KeyRouter
 {
 public:
-    explicit KeyRouter (AppCore& c) : core (c) {}
+    explicit KeyRouter (AppCore& c) : keyHelp (c.keyHelpOn), core (c) {}
 
-    bool keyHelp = false;
+    bool& keyHelp;   // the app core's, so the command and the router agree
 
     // True if the key was used.
     bool handle (const juce::KeyPress& kp, const juce::String& scope)
@@ -697,24 +697,9 @@ private:
 
     void registerWindowCommands()
     {
-        Command help;
-        help.id = "help.key-help"; help.name = "Key help"; help.category = "Help";
-        help.description = "While on, pressing a key says what it does instead of doing it. Press Escape or this key again to turn it off.";
-        help.tags = { "what does this key do", "describe key", "learn" };
-        help.toggleState = [this] { return std::optional<bool> (router.keyHelp); };
-        help.run = [this] (const CommandArgs&) { router.keyHelp = ! router.keyHelp; return CommandResult::done(); };
-        core.commands().add (help);
-
-        Command pal;
-        pal.id = "help.find-command"; pal.name = "Find a command"; pal.category = "Help";
-        pal.description = "Opens a search of every command. Type part of a name or what it does, and press Return to run it.";
-        pal.tags = { "palette", "search", "action list", "everything" };
-        pal.run = [this] (const CommandArgs&) { showPalette(); return CommandResult::done(); };
-        core.commands().add (pal);
-
-        // Shipped keys, not your changes. Command-/ is free on the Mac and Ctrl+/ on Windows.
-        core.keymap().addDefaults ({ { "Primary+/", "help.key-help", "global", {} },
-                                     { "Primary+Shift+P", "help.find-command", "global", {} } });
+        // Key help and Find a command live in the app core (so your keys for
+        // them load at startup); the window only provides the palette.
+        core.onShowPalette = [this] { showPalette(); };
 
         for (auto& id : core.commands().allIds())
             menuIdFor (id);

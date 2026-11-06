@@ -31,8 +31,10 @@ namespace earfirst { class SparkleUpdater; }
 - (void) updater: (SPUUpdater*) updater didFindValidUpdate: (SUAppcastItem*) item
 {
     auto version = juce::String::fromUTF8 ([[item displayVersionString] UTF8String]);
-    auto* o = owner;
-    juce::MessageManager::callAsync ([o, version] { if (o != nullptr && o->onUpdateFound) o->onUpdateFound (version); });
+    // Look at the owner when the call runs, not when it's queued: the app may
+    // have quit (and the updater gone) in between.
+    EFSparkleDelegate* d = self;
+    juce::MessageManager::callAsync ([d, version] { if (d->owner != nullptr && d->owner->onUpdateFound) d->owner->onUpdateFound (version); });
 }
 
 - (BOOL) updater: (SPUUpdater*) updater shouldPostponeRelaunchForUpdate: (SUAppcastItem*) item untilInvokingBlock: (void (^)(void)) installHandler

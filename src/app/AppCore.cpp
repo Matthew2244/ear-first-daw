@@ -80,6 +80,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         engine.getDeviceManager().initialise (1024, 2);
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
         capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
+        capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
         capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
         {
             if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
@@ -276,16 +277,26 @@ juce::String AppCore::leftoverSentence() const
 {
     if (lastOpenReport.leftoverCaptures.isEmpty()) return {};
     double secs = 0;
+    int64_t midiEvents = 0;
     for (auto& run : lastOpenReport.leftoverCaptures)
         if (auto info = CaptureInfo::load (run))
         {
-            CaptureStore store (run, *info);
-            secs += (double) (store.endSampleOnDisk() - store.firstSampleOnDisk()) / info->sampleRate;
+            if (info->numInputs() > 0)
+            {
+                CaptureStore store (run, *info);
+                secs += (double) (store.endSampleOnDisk() - store.firstSampleOnDisk()) / info->sampleRate;
+            }
+            if (auto m = MidiCapture::openExisting (run.getChildFile ("midi")))
+                for (auto& d : m->devices())
+                    midiEvents += (int64_t) m->eventsIn (d, std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max()).size();
         }
+    if (secs < 0.5 && midiEvents == 0) return {};
     auto mins = juce::roundToInt (secs / 60.0);
-    return "The app didn't close properly last time. "
-           + (secs < 90 ? juce::String (juce::roundToInt (secs)) + " seconds" : juce::String (mins) + " minutes")
-           + " of captured audio was never kept. Use Keep recovered audio, or Throw away recovered audio.";
+    juce::StringArray what;
+    if (secs >= 0.5) what.add ((secs < 90 ? juce::String (juce::roundToInt (secs)) + " seconds" : juce::String (mins) + " minutes") + " of audio");
+    if (midiEvents > 0) what.add ("some MIDI");
+    return "The app didn't close properly last time. " + what.joinIntoString (" and ")
+           + " captured then was never kept. Use Keep recovered audio, or Throw away recovered audio.";
 }
 
 juce::File AppCore::keymapFile() const
@@ -1059,13 +1070,38 @@ void AppCore::registerCommands()
             {
                 auto info = CaptureInfo::load (run);
                 if (! info) continue;
-                CaptureStore store (run, *info);
-                juce::Array<int> all;
-                for (int i = 0; i < info->numInputs(); ++i) all.add (i);
-                auto r = store.exportTake (store.firstSampleOnDisk(), store.endSampleOnDisk(), all,
-                                           dest.getChildFile (info->started.formatted ("%Y-%m-%d %H-%M-%S")), "Recovered");
-                if (r.ok()) { run.deleteRecursively(); said.add ("Kept " + juce::String (r.files.size()) + " files."); }
-                else said.add (r.error);
+                auto runDest = dest.getChildFile (info->started.formatted ("%Y-%m-%d %H-%M-%S"));
+                int files = 0;
+                bool ok = true;
+                if (info->numInputs() > 0)
+                {
+                    CaptureStore store (run, *info);
+                    juce::Array<int> all;
+                    for (int i = 0; i < info->numInputs(); ++i) all.add (i);
+                    auto r = store.exportTake (store.firstSampleOnDisk(), store.endSampleOnDisk(), all, runDest, "Recovered");
+                    if (r.ok()) files += r.files.size(); else { ok = false; said.add (r.error); }
+                }
+                // MIDI too, as a standard MIDI file per device, timed in milliseconds.
+                if (auto midiRun = MidiCapture::openExisting (run.getChildFile ("midi")))
+                    for (auto& device : midiRun->devices())
+                    {
+                        auto events = midiRun->eventsIn (device, std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max());
+                        if (events.empty()) continue;
+                        const auto first = events.front().sample;
+                        juce::MidiMessageSequence seq;
+                        for (auto& e : events)
+                            seq.addEvent (juce::MidiMessage (e.message, (double) (e.sample - first) / info->sampleRate * 1000.0));
+                        seq.updateMatchedPairs();
+                        juce::MidiFile mf;
+                        mf.setSmpteTimeFormat (25, 40);   // 1000 ticks a second
+                        mf.addTrack (seq);
+                        runDest.createDirectory();
+                        auto f = runDest.getChildFile (juce::File::createLegalFileName (device) + " Recovered.mid");
+                        juce::FileOutputStream os (f);
+                        if (os.openedOk() && mf.writeTo (os)) ++files; else { ok = false; said.add ("Couldn't save the MIDI from " + device + "."); }
+                    }
+                // Only once everything is safely out is the raw capture removed.
+                if (ok) { run.deleteRecursively(); said.add ("Kept " + juce::String (files) + (files == 1 ? " file." : " files.")); }
             }
             lastOpenReport.leftoverCaptures.clear();
             return CommandResult::done (said.joinIntoString (" ") + " They're in " + dest.getFileName() + ".");
@@ -1367,6 +1403,28 @@ void AppCore::registerCommands()
         add (c);
     }
 
+    // Key help and Find a command (the window shows the palette)
+    {
+        Command c; c.id = "help.key-help"; c.name = "Key help"; c.category = "Help";
+        c.description = "While on, pressing a key says what it does instead of doing it. Press Escape or this key again to turn it off.";
+        c.tags = { "what does this key do", "describe key", "learn" };
+        c.toggleState = [this] { return std::optional<bool> (keyHelpOn); };
+        c.run = [this] (const CommandArgs&) { keyHelpOn = ! keyHelpOn; return CommandResult::done(); };
+        add (c);
+    }
+    {
+        Command c; c.id = "help.find-command"; c.name = "Find a command"; c.category = "Help";
+        c.description = "Opens a search of every command. Type part of a name or what it does, and press Return to run it.";
+        c.tags = { "palette", "search", "action list", "everything" };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (! onShowPalette) return CommandResult::failed ("There's no window to show it in.");
+            onShowPalette();
+            return CommandResult::done();
+        };
+        add (c);
+    }
+
     // MIDI controls
     {
         Command c; c.id = "controls.learn"; c.name = "Assign a MIDI control"; c.category = "Help";
@@ -1500,6 +1558,8 @@ void AppCore::setDefaultKeys()
         k ("Primary+Shift+Period", "speech.next-message"),
         k ("Primary+Shift+W", "speech.read-waiting"),
         k ("Escape", "speech.stop", "main"),
+        k ("Primary+/", "help.key-help"),
+        k ("Primary+Shift+P", "help.find-command"),
         k ("Primary+Shift+V", "speech.settings"),
         k ("Primary+Shift+X", "speech.mute-last-kind"),
     }, keymapDefaultsVersion);

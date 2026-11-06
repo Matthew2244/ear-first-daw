@@ -58,6 +58,10 @@ public:
     // recording): two notes, each about 70 ms. Message thread.
     void playEarcon (float firstHz, float secondHz);
 
+    // The loudest output sample each block, so speech can wait for a gap in
+    // the music. Called on the audio thread; must not block or allocate.
+    std::function<void (float)> onOutputLevel;
+
     // Every MIDI message, as it arrives (on a MIDI thread), for controls.
     std::function<void (const juce::String& device, const juce::MidiMessage&)> onMidi;
 

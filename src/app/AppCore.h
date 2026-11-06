@@ -61,6 +61,8 @@ public:
     juce::String closeSong();
     std::function<void()> onSongChanged;        // the window refreshes its lists
     std::function<void()> onOpenSongRequested;  // the window shows a folder chooser
+    std::function<void()> onShowPalette;        // the window shows Find a command
+    bool keyHelpOn = false;                     // key help: keys say what they do instead of doing it
     std::function<void (std::function<void()>)> onUnsavedClose;   // ask save / don't save / cancel, then run it
 
     // Run a command the way a person asked for it: from a menu or the
