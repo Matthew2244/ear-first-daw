@@ -278,10 +278,12 @@ int main (int argc, char** argv)
         click->setSettings (cs);
         auto& tc = e->getTransport();
         tc.ensureContextAllocated();
+        // Let the engine settle first: on a fresh machine it finds its MIDI
+        // devices during this wait and stops the transport while it does.
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (200);
+        click->refreshNow();
         tc.play (false);
         e->dispatchPendingUpdatesSynchronously();
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
-        click->refreshNow();
         juce::AudioBuffer<float> all (2, 48000 * 2);
         for (int done = 0; done < all.getNumSamples(); done += 256)
         {
