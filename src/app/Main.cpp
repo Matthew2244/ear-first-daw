@@ -566,9 +566,9 @@ public:
         {
             auto n = tracksList().size();
             tracks.selectRow (juce::jlimit (0, std::max (0, n - 1), core.selectedTrack), true, true);
-            if (auto* w = findParentComponentOfClass<juce::DocumentWindow>())
-                w->setName ("Ear First - " + s->getName());
         }
+        if (auto* w = findParentComponentOfClass<juce::DocumentWindow>())
+            w->setName (core.session() ? "Ear First - " + core.session()->getName() : juce::String ("Ear First"));
         tracks.repaint();
         menuItemsChanged();
     }
@@ -822,8 +822,9 @@ public:
         quit();
     }
 
-    // "Save and quit", "Quit without saving", "Cancel". A native alert, which
-    // the screen reader reads as a dialog with its buttons. Escape cancels.
+    // "Save and quit", "Don't save", "Cancel", in the system's own alert: it
+    // reads its message as it opens, Space presses the button you're on,
+    // Escape cancels. (JUCE's own alert didn't take Space, heard 6 Nov 2026.)
     void askToSave (const juce::String& songName, const juce::String& verb, std::function<void()> then)
     {
         auto opts = juce::MessageBoxOptions()
@@ -833,7 +834,7 @@ public:
                         .withButton ("Save and " + verb, 1)
                         .withButton ("Don't save", 2)
                         .withButton ("Cancel", 0);
-        juce::AlertWindow::showAsync (opts, [this, then] (int result)
+        juce::NativeMessageBox::showForOptionsAsync (opts, [this, then] (int result)
         {
             if (core == nullptr || core->session() == nullptr) return;
             if (result == 1)   // save

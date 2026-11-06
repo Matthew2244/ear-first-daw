@@ -50,6 +50,14 @@ double peakMemoryMB()
    #endif
 }
 
+// Test settings go in the temporary folder, never the user's Library.
+struct TempPropertyStorage : public PropertyStorage
+{
+    using PropertyStorage::PropertyStorage;
+    juce::File getAppPrefsFolder() override { return juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (getApplicationName()); }
+    juce::File getAppCacheFolder() override { return getAppPrefsFolder().getChildFile ("Cache"); }
+};
+
 struct QuietEngineBehaviour : public EngineBehaviour
 {
     bool autoInitialiseDeviceManager() override    { return false; }
@@ -394,7 +402,7 @@ int runLive (Engine& engine)
 int main (int argc, char* argv[])
 {
     juce::ScopedJuceInitialiser_GUI init;
-    Engine engine (std::make_unique<PropertyStorage> ("EarFirstCaptureTest"),
+    Engine engine (std::make_unique<TempPropertyStorage> ("EarFirstCaptureTest"),
                    std::make_unique<UIBehaviour>(),
                    std::make_unique<QuietEngineBehaviour>());
 

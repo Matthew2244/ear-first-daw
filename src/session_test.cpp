@@ -21,6 +21,14 @@ void check (bool ok, const juce::String& what)
     say ((ok ? "Pass: " : "FAIL: ") + what);
 }
 
+// Test settings go in the temporary folder, never the user's Library.
+struct TempPropertyStorage : public PropertyStorage
+{
+    using PropertyStorage::PropertyStorage;
+    juce::File getAppPrefsFolder() override { return juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (getApplicationName()); }
+    juce::File getAppCacheFolder() override { return getAppPrefsFolder().getChildFile ("Cache"); }
+};
+
 struct QuietEngineBehaviour : public EngineBehaviour
 {
     bool autoInitialiseDeviceManager() override    { return false; }
@@ -42,7 +50,7 @@ juce::File writeTone (const juce::File& f, double seconds)
 int main()
 {
     juce::ScopedJuceInitialiser_GUI init;
-    Engine engine (std::make_unique<PropertyStorage> ("EarFirstSessionTest"),
+    Engine engine (std::make_unique<TempPropertyStorage> ("EarFirstSessionTest"),
                    std::make_unique<UIBehaviour>(), std::make_unique<QuietEngineBehaviour>());
     say ("Session test: saving, autosave and crash recovery.");
 
