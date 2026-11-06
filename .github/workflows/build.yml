@@ -1,0 +1,56 @@
+# Builds Ear First and runs every test program on macOS and Windows.
+# The tests print one sentence per line, so a failed run reads well by ear.
+name: Build and test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Run the tests
+        shell: bash
+        run: |
+          set -o pipefail
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          failed=0
+          for t in commands-test speech-test session-test capture-recorder-test capture-engine-test ear-first-selftest; do
+            echo "=== $t"
+            if ! "build/${t}_artefacts/Release/${t}${ext}"; then
+              echo "$t failed."
+              failed=1
+            fi
+          done
+          echo "=== capture-test selftest"
+          "build/capture-test_artefacts/Release/capture-test${ext}" selftest || failed=1
+          exit $failed
