@@ -79,6 +79,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
                              "Turn the interface off and on, then choose it again with Record from.";
         engine.getDeviceManager().initialise (1024, 2);
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
+        capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
         capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
         {
             lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
@@ -95,7 +96,7 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         if (v == announcedVersion || ! juce::Process::isForegroundProcess()) return;
         announcedVersion = v;
         saveAppSettings();
-        speaker.say ("Ear First " + v + " is out. Check for Updates in the Help menu when you're ready.", Speech::Priority::normal, "update");
+        say ("Ear First " + v + " is out. Check for Updates in the Help menu when you're ready.", "Updates", "Version " + v + " is out.", Speech::Priority::normal, "update");
     };
 
     registerCommands();
@@ -103,10 +104,10 @@ AppCore::AppCore (SpeechOutput& out, Options o)
     if (options.openAudioDevice) loadAppSettings();   // the self-test starts from defaults
 
     juce::StringArray moved;
-    if (auto f = keymapFile(); f.existsAsFile())
+    if (auto f = keymapFile(); options.saveSettings && f.existsAsFile())
         if (auto r = keys.loadUserChanges (juce::JSON::parse (f), moved); r.failed())
-            speaker.say (r.getErrorMessage(), Speech::Priority::urgent);
-    for (auto& m : moved) speaker.say (m);
+            say (r.getErrorMessage(), "Errors", {}, Speech::Priority::urgent);
+    for (auto& m : moved) say (m, "Startup");
     if (! moved.isEmpty()) saveKeymap();
 
     startTimerHz (20);
@@ -255,10 +256,12 @@ juce::File AppCore::keymapFile() const
 
 void AppCore::saveAppSettings()
 {
+    if (! options.saveSettings) return;
     auto* o = new juce::DynamicObject();
     o->setProperty ("textScale", textScale);
     o->setProperty ("waitForGaps", speaker.settings.waitForGaps);
     o->setProperty ("announcedVersion", announcedVersion);
+    o->setProperty ("speech", speechPrefs.toVar());
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
     f.replaceWithText (juce::JSON::toString (juce::var (o)));
@@ -271,18 +274,50 @@ void AppCore::loadAppSettings()
     textScale = juce::jlimit (0.75f, 3.0f, (float) (double) v.getProperty ("textScale", 1.0));
     speaker.settings.waitForGaps = (bool) v.getProperty ("waitForGaps", true);
     announcedVersion = v.getProperty ("announcedVersion", {}).toString();
+    speechPrefs.fromVar (v.getProperty ("speech", {}));
 }
 
 void AppCore::saveKeymap()
 {
+    if (! options.saveSettings) return;
     auto f = keymapFile();
     f.getParentDirectory().createDirectory();
     f.replaceWithText (juce::JSON::toString (keys.userChangesToJson()));
 }
 
-void AppCore::speak (const juce::String& s, bool urgent)
+void AppCore::speak (const Message& m)
 {
-    speaker.say (s, urgent ? Speech::Priority::urgent : Speech::Priority::normal);
+    // Your choices decide how much is said; the history always keeps it all.
+    lastKind = m.answer ? juce::String ("Answers") : m.kind;
+    const auto text = speechPrefs.choose (m);
+    speaker.say (text, m.urgent ? Speech::Priority::urgent : Speech::Priority::normal, m.topic, m.full);
+}
+
+void AppCore::say (const juce::String& full, const juce::String& kind, const juce::String& brief,
+                   Speech::Priority priority, const juce::String& topic)
+{
+    Message m;
+    m.full = full; m.brief = brief; m.kind = kind; m.topic = topic;
+    m.urgent = priority == Speech::Priority::urgent;
+    lastKind = kind;
+    const auto text = speechPrefs.choose (m);
+    speaker.say (text, priority, topic, full);
+}
+
+juce::String AppCore::placeText (const tracktion::Edit& edit, TimePosition t) const
+{
+    auto bb = edit.tempoSequence.toBarsAndBeats (t);
+    const auto bars = "bar " + juce::String (bb.bars + 1) + " beat " + juce::String (bb.getWholeBeats() + 1);
+    const auto secs = t.inSeconds();
+    const auto time = secs >= 60.0 ? juce::String ((int) (secs / 60.0)) + " minutes " + juce::String (std::fmod (secs, 60.0), 1) + " seconds"
+                                   : juce::String (secs, 1) + " seconds";
+    switch (speechPrefs.places)
+    {
+        case SpeechPrefs::Places::bars: return bars;
+        case SpeechPrefs::Places::time: return time;
+        case SpeechPrefs::Places::barsAndTime: break;
+    }
+    return bars + ", " + time;
 }
 
 void AppCore::beginUndoStep (const juce::String& name)
@@ -592,11 +627,9 @@ juce::String AppCore::captureLine() const
 juce::String AppCore::positionSentence() const
 {
     if (song == nullptr) return "No song is open.";
-    auto& edit = song->getEdit();
-    auto t = edit.getTransport().getPosition();
-    auto bb = edit.tempoSequence.toBarsAndBeats (t);
-    return "Bar " + juce::String (bb.bars + 1) + ", beat " + juce::String (bb.getWholeBeats() + 1) + ", "
-           + juce::String (t.inSeconds(), 1) + " seconds.";
+    auto t = song->getEdit().getTransport().getPosition();
+    auto p = placeText (song->getEdit(), t);
+    return p.substring (0, 1).toUpperCase() + p.substring (1) + ".";
 }
 
 //==============================================================================
@@ -616,7 +649,11 @@ void AppCore::registerCommands()
         c.description = "Makes a new song in its own folder, ready to record.";
         c.args = { textArg ("name", "Untitled") };
         c.tags = { "create", "project", "session" };
-        c.run = [this] (const CommandArgs& a) { auto s = newSong (a["name"].toString()); return song ? CommandResult::done (s) : CommandResult::failed (s); };
+        c.run = [this] (const CommandArgs& a)
+        {
+            auto s = newSong (a["name"].toString());
+            return song ? CommandResult::done (s, "New song, " + song->getName() + ".") : CommandResult::failed (s);
+        };
         add (c);
 
         // The same, asking for the name first. Command-N stays instant.
@@ -635,7 +672,7 @@ void AppCore::registerCommands()
             if (a["folder"].toString().isNotEmpty())
             {
                 auto s = openSong (juce::File (a["folder"].toString()));
-                return song ? CommandResult::done (s) : CommandResult::failed (s);
+                return song ? CommandResult::done (s, "Opened " + song->getName() + ".") : CommandResult::failed (s);
             }
             if (onOpenSongRequested) onOpenSongRequested();
             return CommandResult::done();
@@ -659,7 +696,7 @@ void AppCore::registerCommands()
             {
                 if (onUnsavedClose)
                 {
-                    onUnsavedClose ([this] { speaker.say (closeSong()); });
+                    onUnsavedClose ([this] { say (closeSong(), "File"); });
                     return CommandResult::done();
                 }
                 return CommandResult::failed (song->getName() + " has unsaved changes. Save first, with Command-S.");
@@ -751,7 +788,16 @@ void AppCore::registerCommands()
         Command c; c.id = "click.status"; c.name = "About the click"; c.category = "Click"; c.isReport = true;
         c.description = "Says whether the click is on, the tempo and meter, and how it's set up.";
         c.tags = { "metronome", "tempo", "status" };
-        c.run = [this] (const CommandArgs&) { return CommandResult::done (clickSentence()); };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (! song) return CommandResult::done ("No song is open.");
+            auto& ts = song->getEdit().tempoSequence;
+            auto pos = song->getEdit().getTransport().getPosition();
+            auto& sig = ts.getTimeSigAt (pos);
+            return CommandResult::done (clickSentence(), juce::String (clickIsOn() ? "Click on, " : "Click off, ")
+                                        + juce::String (juce::roundToInt (ts.getTempoAt (pos).getBpm())) + ", "
+                                        + juce::String (sig.numerator.get()) + " " + juce::String (sig.denominator.get()) + ".");
+        };
         add (c);
     }
     {
@@ -885,7 +931,7 @@ void AppCore::registerCommands()
         {
             auto k = capture->keepLast ((double) a["seconds"], song->audioFolder());
             if (onSongChanged) onSongChanged();
-            return k.take.ok() ? CommandResult::done (k.sentence) : CommandResult::failed (k.sentence);
+            return k.take.ok() ? CommandResult::done (k.sentence, k.brief) : CommandResult::failed (k.sentence);
         };
         add (c);
     }
@@ -896,7 +942,11 @@ void AppCore::registerCommands()
         {
             if (capture == nullptr || capture->getRecorder() == nullptr)
                 return CommandResult::done ("Nothing is being captured. No audio inputs are open.");
-            return CommandResult::done (capture->getRecorder()->status());
+            auto* r = capture->getRecorder();
+            const auto secs = (double) r->getPushedSamples() / std::max (1.0, r->getStore().getInfo().sampleRate);
+            return CommandResult::done (r->status(), juce::String (r->getStore().getInfo().numInputs()) + " inputs, "
+                                        + (secs < 90 ? juce::String ((int) secs) + " seconds" : juce::String ((int) (secs / 60)) + " minutes")
+                                        + (r->getDroppedSamples() > 0 ? ", something dropped." : ", nothing dropped."));
         };
         add (c);
     }
@@ -1136,6 +1186,50 @@ void AppCore::registerCommands()
         add (c);
     }
     {
+        Command c; c.id = "speech.settings"; c.name = "Speech settings"; c.category = "Speech";
+        c.description = "Chooses, for each kind of message, whether it's said in full, said short, or not said; and how places are said.";
+        c.tags = { "verbosity", "voiceover", "screen reader", "announcements", "quiet", "chatty" };
+        c.askForSettings = true;
+        for (auto& k : SpeechPrefs::kinds())
+        {
+            ArgSpec a; a.name = k.id; a.type = ArgSpec::Type::choice; a.description = k.description;
+            a.choices = k.canBeOff ? SpeechPrefs::detailNames() : juce::StringArray { "Full", "Short" };
+            a.defaultValue = "Full";
+            auto id = k.id;
+            a.currentValue = [this, id] { return juce::var (SpeechPrefs::detailNames()[(int) speechPrefs.detailFor (id)]); };
+            c.args.push_back (a);
+        }
+        ArgSpec places; places.name = "say places as"; places.type = ArgSpec::Type::choice;
+        places.choices = SpeechPrefs::placeNames(); places.defaultValue = places.choices[0];
+        places.currentValue = [this] { return juce::var (SpeechPrefs::placeNames()[(int) speechPrefs.places]); };
+        c.args.push_back (places);
+        c.run = [this] (const CommandArgs& a)
+        {
+            for (auto& k : SpeechPrefs::kinds())
+                speechPrefs.setDetail (k.id, (SpeechPrefs::Detail) juce::jmax (0, SpeechPrefs::detailNames().indexOf (a[k.id].toString())));
+            speechPrefs.places = (SpeechPrefs::Places) juce::jmax (0, SpeechPrefs::placeNames().indexOf (a["say places as"].toString()));
+            saveAppSettings();
+            return CommandResult::done ("Speech settings saved.");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "speech.mute-last-kind"; c.name = "Don't say that kind"; c.category = "Speech";
+        c.description = "Turns off the kind of message just said. Errors and answers you ask for go short instead. Speech settings brings any kind back.";
+        c.tags = { "quiet", "mute", "stop saying", "less" };
+        c.run = [this] (const CommandArgs&)
+        {
+            const auto kind = lastKind;
+            if (kind.isEmpty() || kind == "Speech") return CommandResult::failed ("Nothing has been said yet to turn off.");
+            speechPrefs.setDetail (kind, SpeechPrefs::Detail::off);
+            saveAppSettings();
+            if (speechPrefs.detailFor (kind) == SpeechPrefs::Detail::brief)
+                return CommandResult::done (kind + " messages are short now. They can't be turned all the way off.");
+            return CommandResult::done (kind + " messages are off. Speech settings brings them back.", kind + " off.");
+        };
+        add (c);
+    }
+    {
         Command c; c.id = "speech.wait-for-gaps"; c.name = "Wait for gaps"; c.category = "Speech";
         c.description = "While the song plays, holds messages until a quiet moment in the music. Urgent ones always cut in.";
         c.toggleState = [this] { return std::optional<bool> (speaker.settings.waitForGaps); };
@@ -1235,6 +1329,8 @@ void AppCore::setDefaultKeys()
         k ("Primary+Shift+Period", "speech.next-message"),
         k ("Primary+Shift+W", "speech.read-waiting"),
         k ("Escape", "speech.stop", "main"),
+        k ("Primary+Shift+V", "speech.settings"),
+        k ("Primary+Shift+X", "speech.mute-last-kind"),
     }, keymapDefaultsVersion);
 }
 

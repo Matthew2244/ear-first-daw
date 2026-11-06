@@ -50,7 +50,10 @@ public:
     explicit Speech (SpeechOutput&);
 
     // Message thread.
-    void say (const juce::String& text, Priority = Priority::normal, const juce::String& topic = {});
+    // `historyText` is what goes into the history (the full message) when it
+    // differs from what's spoken: a short version, or nothing at all.
+    void say (const juce::String& text, Priority = Priority::normal, const juce::String& topic = {},
+              const juce::String& historyText = {});
     void sayUrgent (const juce::String& text)      { say (text, Priority::urgent); }
 
     // Call regularly (a timer, ~20 times a second) with the time in seconds.

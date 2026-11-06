@@ -148,10 +148,10 @@ public:
                 core.commands().run ("help.key-help");
                 return true;
             }
-            if (km.isPrefix (pending, scope)) { core.speech().say (keysForPeople (pending) + ", then"); return true; }
+            if (km.isPrefix (pending, scope)) { core.say (keysForPeople (pending) + ", then", "Help"); return true; }
             pending.clear();
             if (chord.key == "Escape" && chord.mods == 0) { core.commands().run ("help.key-help"); return true; }
-            core.speech().say (km.describeKey (text, scope), Speech::Priority::urgent);
+            core.say (km.describeKey (text, scope), "Help", {}, Speech::Priority::urgent);
             return true;
         }
 
@@ -168,7 +168,7 @@ public:
         pending.clear();
         if (wasSequence)
         {
-            core.speech().say ("That key sequence isn't used.");
+            core.say ("That key sequence isn't used.", "Errors");
             return true;
         }
         return false;
@@ -368,7 +368,7 @@ public:
                 // VoiceOver doesn't say a popup's new choice as you arrow
                 // through it (heard 6 November 2026), so the app does.
                 auto* raw = box.get();
-                box->onChange = [this, raw] { core.speech().say (raw->getText(), Speech::Priority::quiet, "form-choice"); };
+                box->onChange = [this, raw] { core.say (raw->getText(), "Forms", {}, Speech::Priority::quiet, "form-choice"); };
                 f.control = std::move (box);
             }
             else if (a.type == ArgSpec::Type::boolean)
@@ -407,7 +407,7 @@ public:
         juce::Timer::callAfterDelay (1600, [self]
         {
             if (self == nullptr || ! self->isShowing() || self->fields.empty()) return;
-            self->core.speech().say (self->firstFieldSentence(), Speech::Priority::quiet, "form");
+            self->core.say (self->firstFieldSentence(), "Forms", {}, Speech::Priority::quiet, "form");
         });
     }
 
@@ -631,7 +631,7 @@ public:
             output.screenChanged();
             if (paletteWindow) paletteWindow->exitModalState (0);
         });
-        p->onSummary = [this] (const juce::String& s) { core.speech().say (s, Speech::Priority::quiet, "palette"); };
+        p->onSummary = [this] (const juce::String& s) { core.say (s, "Search", SpeechPrefs::firstSentence (s), Speech::Priority::quiet, "palette"); };
         palette = p;
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned (p);
@@ -796,13 +796,14 @@ public:
         output.screenChanged();
 
         // Said once the window has focus and VoiceOver has finished
-        // describing it, or it gets dropped.
-        auto hello = core->startupSentence();
-        juce::Timer::callAfterDelay (1500, [this, hello]
+        // describing it, or it gets dropped. Each part is its own kind, so a
+        // short welcome never cuts off a problem.
+        juce::Timer::callAfterDelay (1500, [this]
         {
             if (core == nullptr) return;
-            core->speech().say ("Press Command-N for a new song, Command-O to open one, or Command-Shift-P to find any command."
-                                + (hello.isNotEmpty() ? " " + hello : juce::String()));
+            core->say ("Press Command-N for a new song, Command-O to open one, or Command-Shift-P to find any command.", "Startup", "Ready.");
+            if (auto p = core->startupProblemSentence(); p.isNotEmpty()) core->say (p, "Errors");
+            if (auto l = core->leftoverSentence(); l.isNotEmpty()) core->say (l, "Capture");
         });
     }
 
@@ -841,7 +842,7 @@ public:
             if (result == 1)   // save
             {
                 auto said = core->session()->save();
-                if (said != "Saved.") { core->speech().sayUrgent (said); return; }
+                if (said != "Saved.") { core->say (said, "Errors", {}, Speech::Priority::urgent); return; }
                 then();
             }
             else if (result == 2)   // don't save

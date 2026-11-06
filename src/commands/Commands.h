@@ -15,6 +15,7 @@
 //  - Repeat last command repeats it with the same arguments.
 
 #include <juce_core/juce_core.h>
+#include "speech/SpeechPrefs.h"
 #include <functional>
 #include <optional>
 #include <map>
@@ -27,7 +28,8 @@ namespace earfirst
 struct CommandHost
 {
     virtual ~CommandHost() = default;
-    virtual void speak (const juce::String& sentence, bool urgent) = 0;
+    // A message with its kind and short version; the host decides how much to say.
+    virtual void speak (const Message&) = 0;
     virtual void beginUndoStep (const juce::String& name) { juce::ignoreUnused (name); }
     virtual void endUndoStep() {}
 };
@@ -53,9 +55,10 @@ struct CommandResult
     bool ok = true;
     juce::String spoken;        // what to say; empty means say nothing
     bool urgent = false;
+    juce::String brief;         // the short version, for people who choose Short; empty = first sentence
 
-    static CommandResult done (juce::String s = {})     { return { true, std::move (s), false }; }
-    static CommandResult failed (juce::String s)        { return { false, std::move (s), true }; }
+    static CommandResult done (juce::String s = {}, juce::String shortVersion = {})  { return { true, std::move (s), false, std::move (shortVersion) }; }
+    static CommandResult failed (juce::String s)        { return { false, std::move (s), true, {} }; }
 };
 
 struct Availability
@@ -131,7 +134,7 @@ public:
 private:
     CommandResult runInternal (const Command&, const CommandArgs&, Source);
     juce::Result checkArgs (const Command&, const CommandArgs& given, CommandArgs& filled) const;
-    void say (const juce::String&, bool urgent);
+    void say (const CommandResult&, const Command*);
 
     CommandHost& host;
     std::map<juce::String, Command> commands;

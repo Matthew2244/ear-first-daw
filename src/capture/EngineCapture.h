@@ -43,6 +43,7 @@ public:
         std::vector<Pass> passes;
         int chosenPass = -1;
         juce::String sentence;
+        juce::String brief;      // the short version: "Kept 30 seconds, 8 inputs."
     };
 
     // Message thread. Keeps the last `seconds` of every input and puts each on
@@ -51,6 +52,9 @@ public:
 
     CaptureRecorder* getRecorder()          { return recorder.get(); }
     MidiCapture* getMidi()                  { return midi.get(); }
+
+    // How to say a place on the timeline; the app sets it from your speech choices.
+    std::function<juce::String (const tracktion::Edit&, tracktion::TimePosition)> describePlace;
 
     // The interface changed: what was captured on the old one is kept on
     // disk, never thrown away, and handed over here (folder, seconds).

@@ -24,7 +24,8 @@ struct TestHost : CommandHost
     juce::StringArray spoken;
     int undoBegins = 0, undoEnds = 0;
     juce::StringArray undoNames;
-    void speak (const juce::String& s, bool) override   { spoken.add (s); }
+    std::vector<Message> messages;
+    void speak (const Message& m) override             { spoken.add (m.full); messages.push_back (m); }
     void beginUndoStep (const juce::String& n) override  { ++undoBegins; undoNames.add (n); }
     void endUndoStep() override                          { ++undoEnds; }
     juce::String last() const                            { return spoken.isEmpty() ? juce::String() : spoken[spoken.size() - 1]; }
@@ -216,6 +217,44 @@ int main()
     check (d.startsWith ("Metronome, on.") && s.metronome, "\"" + d + "\"");
     d = list.describe ("edit.nudge");
     check (d.contains ("amount, normally 1 beat;") && d.contains ("direction, normally forward"), "\"" + d + "\"");
+
+    say ("");
+    say ("Messages carry their kind and a short version");
+    host.messages.clear();
+    s.metronome = false;
+    list.run ("transport.metronome");
+    check (! host.messages.empty() && host.messages.back().kind == "Transport" && host.messages.back().brief == "Metronome on",
+           "a command's message carries its category as its kind, and a toggle's short version is its state.");
+    list.run ("report.position");
+    check (host.messages.back().answer, "a report is marked as an answer you asked for.");
+    s.selectedTrack = -1;
+    list.run ("track.arm");
+    check (host.messages.back().kind == "Errors" && host.messages.back().urgent, "something that can't be done is an error, said at once.");
+
+    say ("");
+    say ("Choosing how much is said");
+    SpeechPrefs prefs;
+    Message keep { "Kept 30 seconds on 8 inputs, lined up where you played it, at bar 12 beat 1, 22.0 seconds.", "Kept 30 seconds, 8 inputs.", "Capture", {}, false, false };
+    check (prefs.choose (keep) == keep.full, "Full says it all.");
+    prefs.setDetail ("Capture", SpeechPrefs::Detail::brief);
+    check (prefs.choose (keep) == "Kept 30 seconds, 8 inputs.", "Short says the short version.");
+    Message noShort { "Saved. Your autosave was cleared.", {}, "File", {}, false, false };
+    prefs.setDetail ("File", SpeechPrefs::Detail::brief);
+    check (prefs.choose (noShort) == "Saved.", "with no short version, Short says the first sentence.");
+    Message decimal { "Tempo 96.5 beats a minute. Was 90.", {}, "Song", {}, false, false };
+    prefs.setDetail ("Song", SpeechPrefs::Detail::brief);
+    check (prefs.choose (decimal) == "Tempo 96.5 beats a minute.", "a decimal point isn't mistaken for the end of a sentence.");
+    prefs.setDetail ("Capture", SpeechPrefs::Detail::off);
+    check (prefs.choose (keep).isEmpty(), "Off says nothing.");
+    prefs.setDetail ("Errors", SpeechPrefs::Detail::off);
+    check (prefs.detailFor ("Errors") == SpeechPrefs::Detail::brief, "errors can't be turned all the way off; asking turns them short.");
+    Message ans { "Bar 3, beat 2, 4.5 seconds.", {}, "Reports", {}, false, true };
+    prefs.setDetail ("Answers", SpeechPrefs::Detail::off);
+    check (prefs.choose (ans).isNotEmpty(), "an answer you asked for is always said.");
+    auto savedPrefs = prefs.toVar();
+    SpeechPrefs back; back.fromVar (juce::JSON::parse (juce::JSON::toString (savedPrefs)));
+    check (back.detailFor ("Capture") == SpeechPrefs::Detail::off && back.detailFor ("File") == SpeechPrefs::Detail::brief
+           && back.detailFor ("Transport") == SpeechPrefs::Detail::full, "your choices save and load.");
 
     say ("");
     say ("Keys: writing them for both systems");

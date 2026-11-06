@@ -16,13 +16,16 @@ void Speech::deliver (const juce::String& text, bool interrupt)
         out.output (text, interrupt);
 }
 
-void Speech::say (const juce::String& text, Priority priority, const juce::String& topic)
+void Speech::say (const juce::String& text, Priority priority, const juce::String& topic, const juce::String& historyText)
 {
+    const auto remembered = historyText.isNotEmpty() ? historyText : text;
+    if (remembered.isNotEmpty())
+    {
+        history.add (remembered);
+        while (history.size() > settings.historySize) history.remove (0);
+        historyCursor = -1;
+    }
     if (text.isEmpty()) return;
-
-    history.add (text);
-    while (history.size() > settings.historySize) history.remove (0);
-    historyCursor = -1;
 
     // A newer message on the same topic replaces one still waiting.
     if (topic.isNotEmpty())

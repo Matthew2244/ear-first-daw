@@ -91,7 +91,7 @@ endif()
 juce_add_console_app(commands-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(commands-test)
 target_compile_features(commands-test PRIVATE cxx_std_20)
-target_sources(commands-test PRIVATE src/commands_test.cpp src/commands/Commands.cpp src/commands/Keymap.cpp)
+target_sources(commands-test PRIVATE src/commands_test.cpp src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/SpeechPrefs.cpp)
 target_include_directories(commands-test PRIVATE src)
 target_compile_definitions(commands-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
 target_link_libraries(commands-test PRIVATE juce::juce_core juce::juce_recommended_config_flags)
@@ -100,7 +100,7 @@ target_link_libraries(commands-test PRIVATE juce::juce_core juce::juce_recommend
 juce_add_console_app(speech-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
 juce_generate_juce_header(speech-test)
 target_compile_features(speech-test PRIVATE cxx_std_20)
-target_sources(speech-test PRIVATE src/speech_test.cpp src/speech/Speech.cpp)
+target_sources(speech-test PRIVATE src/speech_test.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp)
 target_include_directories(speech-test PRIVATE src)
 target_compile_definitions(speech-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
 target_link_libraries(speech-test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_recommended_config_flags)
@@ -125,7 +125,7 @@ endif()
 # The app, and its self-test (the same window code, never shown).
 set(EARFIRST_APP_SOURCES
     src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
-    src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp
+    src/commands/Commands.cpp src/commands/Keymap.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
     src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp)
 if (APPLE)
     list(APPEND EARFIRST_APP_SOURCES src/app/Announce_mac.mm)

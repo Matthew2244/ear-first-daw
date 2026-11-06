@@ -25,6 +25,7 @@ int runSelfTest()
     AppCore::Options o;
     o.openAudioDevice = false;
     o.songsFolder = root;
+    o.saveSettings = false;
     auto core = std::make_unique<AppCore> (out, o);
     auto mc = std::make_unique<MainComponent> (*core, out);
     auto last = [&out] { return out.log.isEmpty() ? juce::String() : out.log[out.log.size() - 1]; };
@@ -93,7 +94,7 @@ int runSelfTest()
     stCheck (last().startsWith ("Last track."), "at the end it says so: \"" + last() + "\"");
 
     press (stKey ('l', cmd | shift));
-    stCheck (last().startsWith ("Bar 1, beat 1"), "Shift-Command-L says where the playhead is: \"" + last() + "\"");
+    stCheck (last().startsWith ("Bar 1 beat 1"), "Shift-Command-L says where the playhead is: \"" + last() + "\"");
     press (stKey ('i', cmd | shift));
     stCheck (last().contains ("2 tracks") && last().contains ("unsaved"), "Shift-Command-I sums up the song: \"" + last() + "\"");
 
@@ -174,6 +175,36 @@ int runSelfTest()
         stCheck (std::abs (tc.getPosition().inSeconds() + oneBar) < 0.01, "from the very start, the count-in starts a whole bar before zero, at "
                  + juce::String (tc.getPosition().inSeconds(), 3) + " seconds.");
         tc.setPosition (tracktion::TimePosition());
+    }
+
+    stSay ("");
+    stSay ("Choosing what's said");
+    mc->lastSettingsForm = nullptr;
+    core->runFromUser ("speech.settings", CommandList::Source::menu);
+    {
+        std::unique_ptr<SettingsForm> form (mc->lastSettingsForm);
+        stCheck (form != nullptr && (int) form->fields.size() == (int) SpeechPrefs::kinds().size() + 1,
+                 "Speech settings opens a form with one choice per kind of message, plus how places are said.");
+        CommandArgs a = form != nullptr ? form->values() : CommandArgs();
+        a.set ("Transport", "Short"); a.set ("say places as", "Bars and beats");
+        core->commands().run ("speech.settings", a);
+        press (stKey ('c'));
+        stCheck (last() == "Click off", "with Transport short, the click toggle still says its state: \"" + last() + "\"");
+        press (stKey ('l', cmd | shift));
+        stCheck (last() == "Bar 1 beat 1.", "places said as bars and beats only: \"" + last() + "\"");
+        press (stKey ('c'));   // back on
+        press (stKey ('x', cmd | shift));
+        stCheck (last().startsWith ("Click messages are off"), "Don't say that kind turns the click's messages off: \"" + last() + "\"");
+        const auto before = out.log.size();
+        press (stKey ('c'));
+        stCheck (out.log.size() == before, "then the click toggle says nothing.");
+        press (stKey ('r', cmd | shift));
+        stCheck (last().startsWith ("Click"), "but it's still in the history, in full: \"" + last() + "\"");
+        // Put things back for the rest of the test.
+        for (auto& k : SpeechPrefs::kinds()) a.set (k.id, "Full");
+        a.set ("say places as", "Bars and time");
+        core->commands().run ("speech.settings", a);
+        press (stKey ('c'));
     }
 
     stSay ("");

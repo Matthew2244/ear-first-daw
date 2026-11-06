@@ -209,10 +209,17 @@ juce::Result CommandList::checkArgs (const Command& c, const CommandArgs& given,
     return juce::Result::ok();
 }
 
-void CommandList::say (const juce::String& s, bool urgent)
+void CommandList::say (const CommandResult& r, const Command* c)
 {
-    if (s.isNotEmpty() && holdSpeech == 0)   // a macro speaks once, at the end, failures included
-        host.speak (s, urgent);
+    if (r.spoken.isEmpty() || holdSpeech > 0)   // a macro speaks once, at the end, failures included
+        return;
+    Message m;
+    m.full = r.spoken;
+    m.brief = r.brief;
+    m.urgent = r.urgent || ! r.ok;
+    m.answer = c != nullptr && c->isReport && r.ok;
+    m.kind = ! r.ok ? juce::String ("Errors") : c != nullptr ? c->category : juce::String ("Errors");
+    host.speak (m);
 }
 
 CommandResult CommandList::runInternal (const Command& c, const CommandArgs& args, Source source)
@@ -240,8 +247,11 @@ CommandResult CommandList::runInternal (const Command& c, const CommandArgs& arg
     // A toggle says its new state, new state first, whatever the command said.
     if (r.ok && c.isToggle())
         if (auto state = c.toggleState())
-            r.spoken = (c.sayNameWithState ? c.name + " " : juce::String()) + (*state ? c.onWord : c.offWord)
-                       + (r.spoken.isNotEmpty() ? ". " + r.spoken : juce::String());
+        {
+            const auto stateText = (c.sayNameWithState ? c.name + " " : juce::String()) + (*state ? c.onWord : c.offWord);
+            r.spoken = stateText + (r.spoken.isNotEmpty() ? ". " + r.spoken : juce::String());
+            if (r.brief.isEmpty()) r.brief = stateText;
+        }
 
     if (r.ok && ! c.isReport && source != Source::repeat && source != Source::macro)
         lastRepeatable = MacroStep { c.id, filled };
@@ -254,11 +264,11 @@ CommandResult CommandList::run (const juce::String& id, const CommandArgs& args,
     if (c == nullptr)
     {
         auto r = CommandResult::failed ("There's no command called " + id + ".");
-        say (r.spoken, true);
+        say (r, nullptr);
         return r;
     }
     auto r = runInternal (*c, args, source);
-    say (r.spoken, r.urgent);
+    say (r, c);
     return r;
 }
 
@@ -267,7 +277,7 @@ CommandResult CommandList::repeatLast()
     if (! lastRepeatable.has_value())
     {
         auto r = CommandResult::failed ("There's nothing to repeat yet.");
-        say (r.spoken, true);
+        say (r, nullptr);
         return r;
     }
     auto step = *lastRepeatable;

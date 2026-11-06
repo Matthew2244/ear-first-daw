@@ -21,13 +21,21 @@ public:
     {
         bool openAudioDevice = true;      // false for the self-test: no microphone, no device
         juce::File songsFolder;           // where new songs go
+        bool saveSettings = true;         // false for the self-test: never touch your settings or keys
     };
 
     AppCore (SpeechOutput&, Options);
     ~AppCore() override;
 
     // CommandHost
-    void speak (const juce::String&, bool urgent) override;
+    void speak (const Message&) override;
+    // Say something that isn't a command's result, through your speech choices.
+    void say (const juce::String& full, const juce::String& kind, const juce::String& brief = {},
+              Speech::Priority = Speech::Priority::normal, const juce::String& topic = {});
+    SpeechPrefs speechPrefs;
+    juce::String lastKind;           // the kind of the last message, for "don't say that kind"
+    // A place on the timeline, the way you've chosen: bars, time, or both.
+    juce::String placeText (const tracktion::Edit&, tracktion::TimePosition) const;
     void beginUndoStep (const juce::String&) override;
     void endUndoStep() override;
 
@@ -40,6 +48,7 @@ public:
     // Said once the window is up: anything found from a run that didn't close cleanly.
     juce::String startupSentence() const;
     juce::String leftoverSentence() const;
+    juce::String startupProblemSentence() const   { return startupProblem; }
 
     // Songs.
     juce::String newSong (const juce::String& name);

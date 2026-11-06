@@ -393,16 +393,19 @@ EngineCapture::Kept EngineCapture::keepLast (double seconds, const juce::File& t
         const int others = (int) k.passes.size() - 1;
         k.sentence = "Kept " + juce::String ((int) k.passes.size()) + " passes of the loop on "
                      + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords
-                     + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + whereText (*edit, k.timelineStart)
+                     + ". Pass " + juce::String (k.chosenPass + 1) + " is on the tracks at " + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart))
                      + (others == 1 ? ". The other pass is saved" : ". The other " + juce::String (others) + " are saved")
                      + " with the take for comping.";
         if (k.take.note.isNotEmpty()) k.sentence += " " + k.take.note;
+        k.brief = "Kept " + juce::String ((int) k.passes.size()) + " passes, pass " + juce::String (k.chosenPass + 1) + " on the tracks.";
         return k;
     }
     k.sentence = "Kept " + secondsText (took) + " on " + juce::String (k.take.files.size())
                  + (k.take.files.size() == 1 ? " input" : " inputs") + midiWords + ", "
                  + (k.linedUpWithSong ? "lined up where you played it, at " : "placed at the playhead, ")
-                 + whereText (*edit, k.timelineStart) + ".";
+                 + (describePlace ? describePlace (*edit, k.timelineStart) : whereText (*edit, k.timelineStart)) + ".";
+    k.brief = "Kept " + secondsText (took) + ", " + juce::String (k.take.files.size()) + (k.take.files.size() == 1 ? " input" : " inputs")
+              + (k.midiClips.isEmpty() ? juce::String() : " and " + juce::String (k.midiClips.size()) + " MIDI") + ".";
     if (k.secondsBeforeSongStart >= 0.5)
         k.sentence += " The first " + secondsText (k.secondsBeforeSongStart)
                       + " came before the song's start, so they're tucked in at the start of the clip.";
