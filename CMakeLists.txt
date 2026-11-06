@@ -104,3 +104,20 @@ target_sources(speech-test PRIVATE src/speech_test.cpp src/speech/Speech.cpp)
 target_include_directories(speech-test PRIVATE src)
 target_compile_definitions(speech-test PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
 target_link_libraries(speech-test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_recommended_config_flags)
+
+# session-test: saving, autosave and crash recovery.
+juce_add_console_app(session-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(session-test)
+target_compile_features(session-test PRIVATE cxx_std_20)
+target_sources(session-test PRIVATE src/session_test.cpp src/session/Session.cpp src/capture/CaptureRecorder.cpp)
+target_include_directories(session-test PRIVATE src)
+target_compile_definitions(session-test PRIVATE
+    JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1 JUCE_STRICT_REFCOUNTEDPOINTER=1
+    JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0 TRACKTION_LOG_DEVICES=0)
+target_link_libraries(session-test PRIVATE
+    tracktion::tracktion_core tracktion::tracktion_engine tracktion::tracktion_graph
+    juce::juce_audio_devices juce::juce_audio_processors juce::juce_audio_utils
+    juce::juce_recommended_config_flags)
+if (APPLE)
+    target_compile_options(session-test PRIVATE "-fno-aligned-allocation")
+endif()
