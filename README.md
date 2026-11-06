@@ -26,3 +26,19 @@ The disk-backed recorder in `src/capture/`: every input to disk for the whole
 session, crash-safe raw segments, sample-exact keeps as stamped broadcast WAVs.
 Run `build/capture-recorder-test_artefacts/Release/capture-recorder-test`; it
 needs no microphone and cleans up after itself.
+
+## capture-engine-test
+
+The capture recorder inside the Tracktion engine. `EngineCapture` wraps the
+engine's audio callback: each block it reads every input untouched, then hands
+the same buffers to the engine, so the two can never overwrite each other.
+`TimelineMap` notes where the song was for each block (only storing changes),
+and keep puts each input on its own track, lined up with where it was played.
+The yardstick is the engine's own normal recording of the same click.
+
+    build/capture-engine-test_artefacts/Release/capture-engine-test [block size]
+
+Covers: song playing from the start and from 30 seconds, playing before the
+song starts, song never played (goes to the playhead), and 64 inputs. Passes
+at block sizes 64, 256, 1024 and 4096. Not yet covered: loops, and a real
+interface's latency.

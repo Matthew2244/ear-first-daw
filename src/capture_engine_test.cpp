@@ -1,0 +1,309 @@
+// capture-engine-test: does a kept take land on the song timeline where it was played?
+//
+// No microphone. A stand-in audio device feeds a click into every input at a
+// known moment, and each test checks where that click lands on the timeline.
+// The yardstick is the engine's own normal recording of the same click.
+//
+// Output is one plain sentence per line, written for a screen reader.
+
+#include <JuceHeader.h>
+#include <tracktion_engine/testing/tracktion_EnginePlayer.h>
+#include "capture/EngineCapture.h"
+#include <iostream>
+#include <thread>
+
+using namespace tracktion;
+
+namespace
+{
+void say (const juce::String& s)    { std::cout << s << std::endl; }
+
+int failures = 0;
+void check (bool ok, const juce::String& what)
+{
+    if (! ok) ++failures;
+    say ((ok ? "Pass: " : "FAIL: ") + what);
+}
+
+constexpr double sr = 48000.0;
+int block = 256;
+
+struct QuietEngineBehaviour : public EngineBehaviour
+{
+    bool autoInitialiseDeviceManager() override    { return false; }
+};
+
+int64_t findClick (Engine& engine, const juce::File& f)
+{
+    std::unique_ptr<juce::AudioFormatReader> r (AudioFileUtils::createReaderFor (engine, f));
+    if (r == nullptr) return -1;
+    juce::AudioBuffer<float> buf ((int) r->numChannels, 4096);
+    for (int64_t pos = 0; pos < r->lengthInSamples; pos += 4096)
+    {
+        auto n = (int) std::min<int64_t> (4096, r->lengthInSamples - pos);
+        r->read (&buf, 0, n, pos, true, true);
+        for (int i = 0; i < n; ++i)
+            if (std::abs (buf.getSample (0, i)) > 0.5f)
+                return pos + i;
+    }
+    return -1;
+}
+
+double clickTimeOnTimeline (Engine& engine, WaveAudioClip& clip)
+{
+    auto idx = findClick (engine, clip.getOriginalFile());
+    if (idx < 0) return -1.0;
+    auto pos = clip.getPosition();
+    return pos.getStart().inSeconds() + (double) idx / sr - pos.getOffset().inSeconds();
+}
+
+struct Rig
+{
+    Rig (Engine& e, int numInputs, bool armForNormalRecording)
+        : engine (e)
+    {
+        params.sampleRate = sr;
+        params.blockSize = block;
+        params.inputChannels = numInputs;
+        params.outputChannels = 2;
+        player = std::make_unique<test_utilities::EnginePlayer> (engine, params);
+        for (auto wi : engine.getDeviceManager().getWaveInputDevices())
+            wi->setEnabled (armForNormalRecording);
+
+        folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("ear-first-engine", {});
+        folder.createDirectory();
+        tempProject = std::make_unique<ProjectManager::TempProject> (engine.getProjectManager(),
+                                                                     folder.getChildFile ("test.tracktion"), true);
+        auto item = tempProject->project->createNewEdit();
+        edit = createEmptyEdit (engine, item->getSourceFile());
+        edit->setProjectItemRef (item->getProjectItemRef());
+        edit->ensureNumberOfAudioTracks (armForNormalRecording ? numInputs : 1);
+
+        auto& transport = edit->getTransport();
+        transport.ensureContextAllocated();
+        if (armForNormalRecording)
+        {
+            auto context = transport.getCurrentPlaybackContext();
+            auto tracks = getAudioTracks (*edit);
+            auto inputs = context->getAllInputs();
+            inputs.removeIf ([] (auto i) { return i->owner.isMidi(); });
+            for (int i = 0; i < std::min (inputs.size(), tracks.size()); ++i)
+            {
+                [[maybe_unused]] auto r = inputs[i]->setTarget (tracks[i]->itemID, true, nullptr, 0);
+                inputs[i]->setRecordingEnabled (tracks[i]->itemID, true);
+            }
+        }
+        edit->dispatchPendingUpdatesSynchronously();
+
+        capture = std::make_unique<earfirst::EngineCapture> (engine, folder.getChildFile ("capture"));
+        capture->attachEdit (edit.get());
+    }
+
+    ~Rig()
+    {
+        capture->attachEdit (nullptr);
+        capture.reset();
+        edit.reset();
+        tempProject.reset();
+        player.reset();
+        auto& dm = engine.getDeviceManager();
+        dm.closeDevices();
+        dm.removeHostedAudioDeviceInterface();
+        dm.deviceManager.closeAudioDevice();
+        folder.deleteRecursively();
+    }
+
+    // `seconds` of silence, with a click on every input `clickAt` seconds in (negative: none).
+    void feed (double seconds, double clickAt = -1.0)
+    {
+        auto total = (int64_t) std::llround (seconds * sr);
+        auto clickSample = clickAt < 0 ? -1 : (int64_t) std::llround (clickAt * sr);
+        const int chunk = block * 64;
+        juce::AudioBuffer<float> in (params.inputChannels, chunk);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int64_t done = 0; done < total;)
+        {
+            auto n = (int) std::min<int64_t> (chunk, total - done);
+            in.setSize (params.inputChannels, n, false, false, true);
+            in.clear();
+            if (clickSample >= done && clickSample < done + n)
+                for (int c = 0; c < params.inputChannels; ++c)
+                    in.setSample (c, (int) (clickSample - done), 1.0f);
+            player->process (in);
+            done += n;
+            // A real device delivers audio in real time. Feed at four times
+            // that, so the disk is tested hard but not asked the impossible.
+            auto due = (double) done / sr / 4.0 * 1000.0;
+            while (juce::Time::getMillisecondCounterHiRes() - t0 < due)
+                std::this_thread::sleep_for (std::chrono::milliseconds (1));
+        }
+    }
+
+    juce::Array<WaveAudioClip*> clips()
+    {
+        juce::Array<WaveAudioClip*> out;
+        for (auto t : getAudioTracks (*edit))
+            for (auto c : t->getClips())
+                if (auto w = dynamic_cast<WaveAudioClip*> (c))
+                    out.add (w);
+        return out;
+    }
+
+    juce::File takes() const    { return folder.getChildFile ("takes"); }
+
+    Engine& engine;
+    HostedAudioDeviceInterface::Parameters params;
+    std::unique_ptr<test_utilities::EnginePlayer> player;
+    juce::File folder;
+    std::unique_ptr<ProjectManager::TempProject> tempProject;
+    std::unique_ptr<Edit> edit;
+    std::unique_ptr<earfirst::EngineCapture> capture;
+};
+
+// One clip per input, every click at the same spot, and that spot where expected.
+void checkPlacement (Engine& engine, earfirst::EngineCapture::Kept& k, int numInputs, double expected,
+                     const juce::String& label, bool expectLinedUp)
+{
+    say (label + " says: " + k.sentence);
+    check (k.take.ok(), label + ": the keep worked. " + k.take.error);
+    check (k.clips.size() == numInputs, label + ": " + juce::String (k.clips.size()) + " clips, one per input.");
+    check (k.linedUpWithSong == expectLinedUp,
+           label + (expectLinedUp ? ": lined up with the song." : ": went to the playhead, since the song wasn't playing."));
+
+    double worst = 0, first = -1;
+    bool found = ! k.clips.isEmpty();
+    int missing = 0;
+    for (auto* c : k.clips)
+    {
+        auto t = clickTimeOnTimeline (engine, *c);
+        if (t < 0) { found = false; ++missing; say ("  no click in " + c->getName() + ", file " + c->getOriginalFile().getFileName() + ", " + juce::String (c->getOriginalFile().getSize()) + " bytes"); continue; }
+        if (first < 0) first = t;
+        worst = std::max (worst, std::abs (t - expected));
+    }
+    check (found, label + ": the click is in every clip (" + juce::String (missing) + " missing).");
+    const double samplesOff = worst * sr;
+    check (samplesOff < 0.5, label + ": the click lands at " + juce::String (first, 4) + " seconds on every track, expected "
+           + juce::String (expected, 4) + ". Off by " + juce::String (samplesOff, 1) + " samples at worst.");
+}
+} // namespace
+
+int main (int argc, char** argv)
+{
+    if (argc > 1) block = juce::String (argv[1]).getIntValue();
+    juce::ScopedJuceInitialiser_GUI init;
+    Engine engine (std::make_unique<PropertyStorage> ("EarFirstEngineCaptureTest"),
+                   std::make_unique<UIBehaviour>(),
+                   std::make_unique<QuietEngineBehaviour>());
+
+    say ("Engine capture test, audio blocks of " + juce::String (block) + " samples. No microphone is used.");
+
+    // The yardstick: where the engine's normal recording puts a click 6 seconds in.
+    double reference = -1;
+    {
+        Rig rig (engine, 8, true);
+        auto& tc = rig.edit->getTransport();
+        tc.record (false, false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.0);
+        tc.stop (false, true);
+        auto clips = rig.clips();
+        if (! clips.isEmpty()) reference = clickTimeOnTimeline (engine, *clips[0]);
+        say ("Normal recording puts a click played 6 seconds in at " + juce::String (reference, 4) + " seconds.");
+        check (clips.size() == 8 && reference > 0, "the engine's own recording still works with the capture running alongside ("
+               + juce::String (clips.size()) + " takes).");
+    }
+    const double lag = reference > 0 ? reference - 6.0 : 0.0;   // whatever the engine's own path adds
+
+    // 1. Song playing from the start. Click 6 seconds in, keep the last 10.
+    {
+        say ("");
+        say ("Test 1: 8 inputs, song playing from the start, click 6 seconds in.");
+        Rig rig (engine, 8, false);
+        auto& tc = rig.edit->getTransport();
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.0);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        tc.stop (false, true);
+        checkPlacement (engine, k, 8, 6.0 + lag, "Test 1", true);
+        if (std::getenv ("EARFIRST_DEBUG"))
+            for (auto& an : rig.capture->getTimelineMap().getAnchors())
+                say ("  anchor: capture " + juce::String (an.captureSample) + ", timeline " + juce::String (an.editSample)
+                     + (an.playing ? ", playing" : ", stopped"));
+    }
+
+    // 2. Song playing from 30 seconds in.
+    {
+        say ("");
+        say ("Test 2: song playing from 30 seconds in, click 6 seconds later, so it belongs at 36.");
+        Rig rig (engine, 8, false);
+        auto& tc = rig.edit->getTransport();
+        tc.setPosition (TimePosition::fromSeconds (30.0));
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.0);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        tc.stop (false, true);
+        checkPlacement (engine, k, 8, 36.0 + lag, "Test 2", true);
+    }
+
+    // 3. Playing before the song starts: stopped 4 seconds, then play from 10.
+    //    The click comes 2 seconds after play, so it belongs at 12, and the
+    //    4 seconds before play land just ahead of it.
+    {
+        say ("");
+        say ("Test 3: you start playing, then start the song at 10 seconds. Click 2 seconds after the song starts, so it belongs at 12.");
+        Rig rig (engine, 8, false);
+        auto& tc = rig.edit->getTransport();
+        tc.setPosition (TimePosition::fromSeconds (10.0));
+        rig.feed (4.0);
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (6.0, 2.0);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        tc.stop (false, true);
+        checkPlacement (engine, k, 8, 12.0 + lag, "Test 3", true);
+        if (std::getenv ("EARFIRST_DEBUG"))
+            for (auto& an : rig.capture->getTimelineMap().getAnchors())
+                say ("  anchor: capture " + juce::String (an.captureSample) + ", timeline " + juce::String (an.editSample)
+                     + (an.playing ? ", playing" : ", stopped"));
+        if (! k.clips.isEmpty())
+            say ("Test 3: the take starts at " + juce::String (k.clips[0]->getPosition().getStart().inSeconds(), 3)
+                 + " seconds, so the 4 seconds before the song started come just ahead of 10.");
+    }
+
+    // 4. Song never played. It goes at the playhead.
+    {
+        say ("");
+        say ("Test 4: song stopped with the playhead at 20 seconds. Click 6 seconds in, keep the last 10.");
+        Rig rig (engine, 4, false);
+        auto& tc = rig.edit->getTransport();
+        tc.setPosition (TimePosition::fromSeconds (20.0));
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.0);
+        auto k = rig.capture->keepLast (10, rig.takes());
+        checkPlacement (engine, k, 4, 26.0, "Test 4", false);
+    }
+
+    // 5. A full room: 64 inputs, song playing.
+    {
+        say ("");
+        say ("Test 5: 64 inputs, song playing from the start, click 6 seconds in.");
+        Rig rig (engine, 64, false);
+        auto& tc = rig.edit->getTransport();
+        tc.play (false);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        rig.feed (10.0, 6.0);
+        auto t0 = juce::Time::getMillisecondCounterHiRes();
+        auto k = rig.capture->keepLast (10, rig.takes());
+        auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        tc.stop (false, true);
+        checkPlacement (engine, k, 64, 6.0 + lag, "Test 5", true);
+        say ("Test 5: keeping 64 inputs and putting them on 64 tracks took " + juce::String (juce::roundToInt (ms)) + " milliseconds.");
+        check (rig.capture->getRecorder() != nullptr && rig.capture->getRecorder()->getDroppedSamples() == 0, "Test 5: nothing dropped.");
+    }
+
+    say ("");
+    say (failures == 0 ? "All checks passed." : juce::String (failures) + " checks failed.");
+    return failures == 0 ? 0 : 1;
+}

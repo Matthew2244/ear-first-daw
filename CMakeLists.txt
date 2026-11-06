@@ -60,3 +60,29 @@ target_link_libraries(capture-live PRIVATE
     juce::juce_audio_formats
     juce::juce_audio_devices
     juce::juce_recommended_config_flags)
+
+# capture-engine-test: kept takes land on the song timeline where they were played.
+juce_add_console_app(capture-engine-test NEEDS_CURL FALSE NEEDS_WEB_BROWSER FALSE)
+juce_generate_juce_header(capture-engine-test)
+target_compile_features(capture-engine-test PRIVATE cxx_std_20)
+target_sources(capture-engine-test PRIVATE src/capture_engine_test.cpp src/capture/EngineCapture.cpp src/capture/CaptureRecorder.cpp)
+target_include_directories(capture-engine-test PRIVATE src)
+target_compile_definitions(capture-engine-test PRIVATE
+    JUCE_PLUGINHOST_AU=1
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_STRICT_REFCOUNTEDPOINTER=1
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    JUCE_USE_CURL=0
+    JUCE_WEB_BROWSER=0
+    TRACKTION_LOG_DEVICES=0)
+target_link_libraries(capture-engine-test PRIVATE
+    tracktion::tracktion_core
+    tracktion::tracktion_engine
+    tracktion::tracktion_graph
+    juce::juce_audio_devices
+    juce::juce_audio_processors
+    juce::juce_audio_utils
+    juce::juce_recommended_config_flags)
+if (APPLE)
+    target_compile_options(capture-engine-test PRIVATE "-fno-aligned-allocation")
+endif()
