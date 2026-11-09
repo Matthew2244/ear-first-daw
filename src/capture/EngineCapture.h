@@ -16,6 +16,7 @@
 #include "capture/TimelineMap.h"
 #include "capture/MidiCapture.h"
 #include "capture/ReturnFinder.h"
+#include "capture/RouteMatrix.h"
 #include <map>
 #include <array>
 
@@ -92,6 +93,16 @@ public:
     void playSweep()                          { sweepRequested = true; }   // just the sound (tests)
     juce::StringArray getInputNames() const   { std::lock_guard<std::mutex> g (namesLock); return inputNames; }
     juce::String getInterfaceName() const     { std::lock_guard<std::mutex> g (namesLock); return interfaceName; }
+    juce::StringArray getOutputNames() const  { std::lock_guard<std::mutex> g (namesLock); return outputNames; }
+
+    // Any input to any output, by channel name, live whether or not a song is
+    // open. It changes what you hear and nothing that's captured. The app
+    // answers this for each interface. A name that isn't on the interface is
+    // ignored, and so is an input carrying the computer's own sound: sending
+    // that to an output would feed back.
+    struct NamedRoute { juce::String input, output; float gain = 1.0f; };
+    std::function<std::vector<NamedRoute> (const juce::String& interfaceName)> routesFor;
+    void refreshRoutes();                     // after you change the routes
 
     // A short tone mixed into the outputs (never the inputs, so never into a
     // recording): two notes, each about 70 ms. Message thread.
@@ -127,8 +138,10 @@ private:
     TimelineMap map;
     double sampleRate = 0;
     int numInputs = 0;
-    juce::StringArray inputNames;
+    juce::StringArray inputNames, outputNames;
     juce::String interfaceName;
+    RouteMatrix routes;
+    std::atomic<int> routeCapacity { 8192 };    // the most samples a block can route
     mutable std::mutex namesLock;               // inputNames and interfaceName, read from the message thread
 
     std::atomic<tracktion::Edit*> edit { nullptr };   // read on the audio thread too

@@ -175,11 +175,19 @@ void EngineCapture::audioDeviceAboutToStart (juce::AudioIODevice* device)
         if (active[i]) newNames.add (names[i].isNotEmpty() ? names[i] : "Input " + juce::String (i + 1));
     const double rate = device->getCurrentSampleRate();
 
+    auto outNames = device->getOutputChannelNames();
+    auto activeOut = device->getActiveOutputChannels();
+    juce::StringArray newOutNames;
+    for (int i = 0; i < outNames.size(); ++i)
+        if (activeOut[i]) newOutNames.add (outNames[i].isNotEmpty() ? outNames[i] : "Output " + juce::String (i + 1));
+    routeCapacity = std::max (8192, device->getCurrentBufferSizeSamples() * 2);
+
     bool sameInterface;
     {
         std::lock_guard<std::mutex> g (namesLock);
         sameInterface = interfaceName == device->getName();
         interfaceName = device->getName();
+        outputNames = newOutNames;
     }
     // How far behind the output an input can hear it: both latencies and a
     // buffer each way, with as much again to spare.
@@ -262,11 +270,12 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     // Inputs first, before the engine can touch the buffers.
     const auto blockPos = blockStart.load (std::memory_order_relaxed);
     capture (in, numIn, n);
+    const float routedPeak = routes.readInputs (in, numIn, n);
     engineCallback->audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, deviceContext);
     if (onOutputLevel)
     {
         // Before the earcon is mixed in, so speech waits for the music, not for itself.
-        float peak = 0;
+        float peak = routedPeak;
         for (int c = 0; c < numOut; ++c)
             if (out[c] != nullptr)
             {
@@ -285,6 +294,9 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
         outRing[(size_t) ((blockPos + i) & (outRingSize - 1))] = v;
     }
     outWritten.store (blockPos + n, std::memory_order_release);
+    // Live inputs go out last, and stay out of that note: otherwise any input
+    // you route would match what went out and be taken for a computer return.
+    routes.mix (out, numOut, n);
     // The clock runs whenever the device does, inputs or not, so MIDI is
     // captured and placed even with no audio inputs open.
     if (sampleRate > 0)
@@ -645,6 +657,26 @@ void EngineCapture::refreshComputerInputs()
     if (computerInputsFor != nullptr) marked = computerInputsFor (iface);
     for (size_t i = 0; i < computerInput.size(); ++i)
         computerInput[i] = (int) i < names.size() && marked.contains (names[(int) i]);
+    refreshRoutes();   // an input just found to be a return must stop going out
+}
+
+void EngineCapture::refreshRoutes()
+{
+    juce::StringArray inputs, outputs;
+    juce::String iface;
+    {
+        std::lock_guard<std::mutex> g (namesLock);
+        inputs = inputNames; outputs = outputNames; iface = interfaceName;
+    }
+    std::vector<RouteMatrix::Route> resolved;
+    if (routesFor != nullptr)
+        for (auto& r : routesFor (iface))
+        {
+            const int in = inputs.indexOf (r.input), out = outputs.indexOf (r.output);
+            if (in < 0 || out < 0 || (in < (int) computerInput.size() && computerInput[(size_t) in].load())) continue;
+            resolved.push_back ({ in, out, r.gain });
+        }
+    routes.set (resolved, routeCapacity.load(), engine.getDeviceManager().deviceManager.getAudioCallbackLock());
 }
 
 void EngineCapture::renderSweep (float* const* out, int numOut, int n, int64_t blockPos) noexcept

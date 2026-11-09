@@ -68,13 +68,13 @@ double clickTimeOnTimeline (Engine& engine, WaveAudioClip& clip)
 
 struct Rig
 {
-    Rig (Engine& e, int numInputs, bool armForNormalRecording)
+    Rig (Engine& e, int numInputs, bool armForNormalRecording, int numOutputs = 2)
         : engine (e)
     {
         params.sampleRate = sr;
         params.blockSize = block;
         params.inputChannels = numInputs;
-        params.outputChannels = 2;
+        params.outputChannels = numOutputs;
         player = std::make_unique<test_utilities::EnginePlayer> (engine, params);
         for (auto wi : engine.getDeviceManager().getWaveInputDevices())
             wi->setEnabled (armForNormalRecording);
@@ -538,6 +538,117 @@ int main (int argc, char** argv)
             check (found.size() == 1 && found[0] == names[1],
                    "Test 6e: while sound plays, it finds the return by itself (found: " + found.joinIntoString (", ") + ").");
         }
+    }
+
+    // 6f. Routing: any input to any output, live.
+    {
+        say ("");
+        say ("Test 6f: routing. Three inputs, four outputs, a steady signal on each input.");
+        Rig rig (engine, 3, false, 4);
+        // Each input a different level, a block at a time. Returns the peak
+        // of each output over the last block.
+        auto run = [&] (int blocks, float a = 0.1f, float b = 0.2f, float c = 0.4f)
+        {
+            juce::AudioBuffer<float> in (3, block);
+            std::array<float, 4> peaks {};
+            for (int i = 0; i < blocks; ++i)
+            {
+                for (int s = 0; s < block; ++s) { in.setSample (0, s, a); in.setSample (1, s, b); in.setSample (2, s, c); }
+                auto out = rig.player->process (in);
+                for (int ch = 0; ch < 4; ++ch) peaks[(size_t) ch] = ch < out.getNumChannels() ? out.getMagnitude (ch, 0, block) : -1.0f;
+            }
+            return peaks;
+        };
+        auto near = [] (float v, float want) { return std::abs (v - want) < 0.001f; };
+        const auto inputs = rig.capture->getInputNames();
+        const auto outputs = rig.capture->getOutputNames();
+        check (outputs.size() == 4, "Test 6f: all four outputs are known (" + juce::String (outputs.size()) + ").");
+
+        std::vector<earfirst::EngineCapture::NamedRoute> wanted;
+        rig.capture->routesFor = [&] (const juce::String&) { return wanted; };
+        rig.capture->refreshRoutes();
+        auto p = run (8);
+        check (near (p[0], 0) && near (p[1], 0) && near (p[2], 0) && near (p[3], 0), "Test 6f: with no routes, nothing goes out.");
+
+        wanted = { { inputs[1], outputs[2], 1.0f }, { inputs[2], outputs[3], 0.5f } };
+        rig.capture->refreshRoutes();
+        p = run (8);
+        check (near (p[2], 0.2f), "Test 6f: input 2 reaches output 3 at full level (" + juce::String (p[2], 3) + ").");
+        check (near (p[3], 0.2f), "Test 6f: input 3 reaches output 4 at half level (" + juce::String (p[3], 3) + ").");
+        check (near (p[0], 0) && near (p[1], 0), "Test 6f: outputs 1 and 2 stay silent.");
+
+        wanted = { { inputs[0], outputs[0], 1.0f }, { inputs[1], outputs[0], 1.0f } };
+        rig.capture->refreshRoutes();
+        p = run (8);
+        check (near (p[0], 0.3f), "Test 6f: two inputs add together on one output (" + juce::String (p[0], 3) + ").");
+        check (near (p[2], 0) && near (p[3], 0), "Test 6f: removed routes fall silent.");
+
+        // A route that appears ramps in: its first block must start from nothing.
+        wanted = { { inputs[2], outputs[1], 1.0f } };
+        rig.capture->refreshRoutes();
+        {
+            juce::AudioBuffer<float> in (3, block);
+            for (int s = 0; s < block; ++s) { in.setSample (0, s, 0); in.setSample (1, s, 0); in.setSample (2, s, 0.4f); }
+            auto out = rig.player->process (in);
+            const float first = std::abs (out.getSample (1, 0)), last = std::abs (out.getSample (1, block - 1));
+            check (first < 0.01f && near (last, 0.4f), "Test 6f: a new route fades in over one block, no click (first sample " + juce::String (first, 4) + ", last " + juce::String (last, 3) + ").");
+        }
+
+        // The computer's own sound must never go back out.
+        rig.capture->computerInputsFor = [&] (const juce::String&) { return juce::StringArray (inputs[2]); };
+        rig.capture->refreshComputerInputs();
+        run (2);
+        p = run (4);
+        check (near (p[1], 0), "Test 6f: an input marked as the computer's own sound stops going out (" + juce::String (p[1], 3) + ").");
+        rig.capture->computerInputsFor = nullptr;
+        rig.capture->refreshComputerInputs();
+
+        // What you route is what you hear, not what's captured, and it must
+        // not make the input look like a return of what went out.
+        wanted = { { inputs[0], outputs[0], 1.0f }, { inputs[0], outputs[1], 1.0f } };
+        rig.capture->refreshRoutes();
+        juce::StringArray found;
+        rig.capture->onComputerInputsFound = [&] (const juce::String&, const juce::StringArray& f) { found.addArray (f); };
+        rig.feedLoopback (4.0);
+        check (! found.contains (inputs[0]), "Test 6f: a routed input isn't mistaken for the computer's own sound (found: " + found.joinIntoString (", ") + ").");
+        rig.capture->onComputerInputsFound = nullptr;
+        check (rig.capture->getRecorder() != nullptr && rig.capture->getRecorder()->getDroppedSamples() == 0, "Test 6f: nothing dropped from capture.");
+        wanted.clear();
+        rig.capture->routesFor = nullptr;
+    }
+
+    // 6g. A track through outputs of its own.
+    {
+        say ("");
+        say ("Test 6g: a track played through outputs 3 and 4.");
+        Rig rig (engine, 1, false, 4);
+        rig.feed (2.0, 1.0);
+        auto k = rig.capture->keepLast (2.0, rig.takes());
+        check (k.clips.size() == 1, "Test 6g: the take is on a track.");
+        auto& dm = engine.getDeviceManager();
+        juce::String id;
+        for (auto* wo : dm.getWaveOutputDevices())
+            if (wo->getName().contains ("3")) id = wo->getDeviceID();
+        check (id.isNotEmpty(), "Test 6g: the engine lists outputs 3 and 4.");
+        dynamic_cast<AudioTrack*> (k.clips[0]->getTrack())->getOutput().setOutputToDeviceID (id);
+        rig.edit->dispatchPendingUpdatesSynchronously();
+        auto& tr = rig.edit->getTransport();
+        tr.setPosition (TimePosition());
+        tr.play (false);
+        juce::AudioBuffer<float> in (1, block);
+        in.clear();
+        std::array<float, 4> peak {};
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int64_t done = 0; done < (int64_t) (3.0 * sr); done += block)
+        {
+            auto out = rig.player->process (in);
+            for (int c = 0; c < std::min (4, out.getNumChannels()); ++c) peak[(size_t) c] = std::max (peak[(size_t) c], out.getMagnitude (c, 0, block));
+            while (juce::Time::getMillisecondCounterHiRes() - t0 < (double) (done + block) / sr * 1000.0)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+        }
+        tr.stop (false, false);
+        check (peak[2] > 0.2f && peak[3] > 0.2f, "Test 6g: the take comes out of outputs 3 and 4 (" + juce::String (peak[2], 3) + ", " + juce::String (peak[3], 3) + ").");
+        check (peak[0] < 0.001f && peak[1] < 0.001f, "Test 6g: and not 1 and 2 (" + juce::String (peak[0], 3) + ", " + juce::String (peak[1], 3) + ").");
     }
 
     // 7. MIDI: a note at 6 seconds, the pedal down at 2, a note held past the end.

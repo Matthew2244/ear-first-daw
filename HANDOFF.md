@@ -24,12 +24,14 @@ Ear First is an ear-first, accessibility-first DAW on JUCE and Tracktion Engine,
 - **Commands, keys, speech** (`src/commands`, `src/speech`). Detail per kind: Full, Short, Sound, Off. Earcons go to the outputs only. MIDI controls run any command. Custom keys are stored apart from defaults.
 - **Songs** (`src/session`). A song is a folder, with safe saves, autosave and recovery. A hidden idle Edit keeps MIDI alive with no song open.
 - **Click** (`src/click`). On its own track, locked to tempo and meter; accents, subdivisions, swing, count-in. Sounds are the four recorded takes Matthew picked (`src/click/sounds`, embedded as binary data), plus the Beep, which is made in code. `ClickSamples` imports any audio file: trims the lead-in, resamples, matches level, and caches for the whole run so the audio thread never frees one. Defaults: Cowbell 1 on the one, Clave on beats, Hi-hat on subdivisions.
+- **Routing.** Any input to any output (`src/capture/RouteMatrix.h`), mixed at the audio callback, with or without a song. Inputs are copied before the engine runs and mixed in last, after the "what went out" note, so a routed input is never taken for a computer return. An input marked as the computer's own sound is refused and never goes out, since that's a feedback loop. Commands: Send input to output (one channel or a neighbouring pair, with a level), Remove a route, Remove every route, What's routed. Saved per interface by channel name in App.json. Play track through picks a track's outputs through the engine, and is saved in the song.
+  Checked on a 64-input interface with VoiceOver: all 64 outputs open, the forms speak each field and the result, the feedback refusal is spoken, and a routed input came back through the interface's computer return at a steady round trip, stronger with level and gone once removed. Not yet heard by a person, and Play track through hasn't been used with VoiceOver.
 - **Command line.** `--run <command-id>` runs a command once the app is up. It's the way to do live checks without driving the window.
 - **Mac app.** Signed with `EARFIRST_SIGN_IDENTITY` through `cmake/sign_mac.sh`, Sparkle embedded.
 
 ## Next
 
-1. **Routing.** Any input to any output. Not built: today each input is captured, a Keep puts each on its own track, and everything plays through one output pair. The engine can do it. Matthew asked for it and is happy for it to come next.
+1. **Routing, the rest.** Keys for the routing commands, a spoken or on-screen matrix, sends, and a cue mix per player.
 2. **Click sounds still open.** Matthew hasn't yet judged round two: five ticks and two woodblocks in iCloud, `Ear First DAW/Click candidates 2`. There's no good rim: 0 clean of 14 from ElevenLabs. A real recording or an import is the way.
 3. From the README: grooves as the click, a spoken count, editing takes, mixing, plugins. The living list of ideas is iCloud `Ear First DAW/Feature list.md`.
 
@@ -45,6 +47,7 @@ Ear First is an ear-first, accessibility-first DAW on JUCE and Tracktion Engine,
 - Tracktion frees `EditPlaybackContext` on the message thread without the audio lock, so `noteTimeline` has a very small window where it could touch a freed context. It can't be fully closed from outside the engine.
 - `MidiCapture::written` holds every MIDI event in memory for the run.
 - A mic loud enough to hear the click or song through the speakers counts as playing, so quit keeps that session.
+- `capture-engine-test 4096`: Test 6e (the sweep finds the return) fails at that block size, and failed the same way before routing. Every other size passes.
 - The click is too narrow to judge a return by, so that check depends on the song or the sweep.
 
 ## Traps already paid for

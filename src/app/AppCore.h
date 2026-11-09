@@ -144,6 +144,15 @@ private:
     juce::StringArray checkedInterfaces;
     mutable std::mutex computerInputsLock;
     juce::StringArray computerInputsOn (const juce::String& interfaceName) const;
+
+    // Routing, per interface, by channel name. Guarded by computerInputsLock.
+    struct RouteSetting { juce::String input, output; double db = 0; };
+    std::map<juce::String, std::vector<RouteSetting>> routeSettings;
+    std::vector<EngineCapture::NamedRoute> routesOn (const juce::String& interfaceName) const;
+    juce::String routesSentence() const;
+    static juce::String describeRoute (const RouteSetting&);
+    static juce::StringArray channelChoices (const juce::StringArray& names);
+    static juce::StringArray channelsIn (const juce::String& choice, const juce::StringArray& names);
     juce::String preferredInput, preferredOutput;   // the interface you chose; tried first at every launch
     juce::String startupProblem;   // said at startup: an interface that wouldn't answer
     juce::String savedInterfaceThatWontAnswer();   // said after a device switch kept the old capture

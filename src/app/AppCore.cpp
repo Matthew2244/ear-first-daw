@@ -77,11 +77,12 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         if (auto stuck = savedInterfaceThatWontAnswer(); stuck.isNotEmpty())
             startupProblem = stuck + " isn't answering, so Ear First is using other audio for now. "
                              "Turn the interface off and on, then choose it again with Record from.";
-        engine.getDeviceManager().initialise (1024, 2);
+        engine.getDeviceManager().initialise (1024, 1024);   // every input and output the interface has: routing can reach any of them
         capture = std::make_unique<EngineCapture> (engine, captureRoot);
         capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
         capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
         capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
+        capture->routesFor = [this] (const juce::String& iface) { return routesOn (iface); };
         capture->onComputerInputsFound = [this] (const juce::String& iface, const juce::StringArray& found)
         {
             markComputerInputs (iface, found, false, true);
@@ -350,6 +351,21 @@ void AppCore::saveAppSettings()
         juce::Array<juce::var> checked;
         for (auto& n : checkedInterfaces) checked.add (n);
         o->setProperty ("checkedInterfaces", checked);
+        auto* routed = new juce::DynamicObject();
+        for (auto& [iface, list] : routeSettings)
+        {
+            juce::Array<juce::var> items;
+            for (auto& r : list)
+            {
+                auto* item = new juce::DynamicObject();
+                item->setProperty ("input", r.input);
+                item->setProperty ("output", r.output);
+                item->setProperty ("db", r.db);
+                items.add (juce::var (item));
+            }
+            if (! items.isEmpty()) routed->setProperty (iface, items);
+        }
+        o->setProperty ("routes", juce::var (routed));
     }
     auto f = appDataFolder().getChildFile ("App.json");
     f.getParentDirectory().createDirectory();
@@ -380,6 +396,92 @@ void AppCore::loadAppSettings()
         for (auto& p : nci->getProperties())
             if (auto* arr = p.value.getArray())
                 for (auto& n : *arr) notComputerInputs[p.name.toString()].add (n.toString());
+    routeSettings.clear();
+    if (auto* routed = v.getProperty ("routes", {}).getDynamicObject())
+        for (auto& p : routed->getProperties())
+            if (auto* arr = p.value.getArray())
+                for (auto& r : *arr)
+                    routeSettings[p.name.toString()].push_back ({ r.getProperty ("input", {}).toString(), r.getProperty ("output", {}).toString(),
+                                                                  (double) r.getProperty ("db", 0.0) });
+}
+
+//==============================================================================
+// Routing. A choice is one channel, or a neighbouring pair (1 and 2, 3 and 4).
+juce::StringArray AppCore::channelChoices (const juce::StringArray& names)
+{
+    juce::StringArray out (names);
+    for (int i = 0; i + 1 < names.size(); i += 2)
+        out.add (names[i] + " and " + names[i + 1]);
+    return out;
+}
+
+juce::StringArray AppCore::channelsIn (const juce::String& choice, const juce::StringArray& names)
+{
+    if (names.contains (choice)) return juce::StringArray (choice);
+    for (int i = 0; i + 1 < names.size(); i += 2)
+        if (choice == names[i] + " and " + names[i + 1])
+            return juce::StringArray (names[i], names[i + 1]);
+    return {};
+}
+
+std::vector<EngineCapture::NamedRoute> AppCore::routesOn (const juce::String& iface) const
+{
+    if (capture == nullptr) return {};
+    const auto inputs = capture->getInputNames(), outputs = capture->getOutputNames();
+    std::vector<RouteSetting> settings;
+    {
+        std::lock_guard<std::mutex> g (computerInputsLock);
+        if (auto it = routeSettings.find (iface); it != routeSettings.end()) settings = it->second;
+    }
+    // The same channel pair named twice counts once: the later setting wins.
+    std::map<std::pair<juce::String, juce::String>, float> gains;
+    for (auto& r : settings)
+    {
+        const auto in = channelsIn (r.input, inputs), out = channelsIn (r.output, outputs);
+        const auto gain = juce::Decibels::decibelsToGain ((float) r.db);
+        if (in.size() == 2 && out.size() == 2)
+        {
+            gains[{ in[0], out[0] }] = gain;      // left to left, right to right
+            gains[{ in[1], out[1] }] = gain;
+        }
+        else
+            for (auto& a : in)
+                for (auto& b : out)
+                    gains[{ a, b }] = in.size() == 2 ? gain * 0.7079f : gain;   // a pair folded to one output, 3 dB down each
+    }
+    std::vector<EngineCapture::NamedRoute> result;
+    for (auto& [key, gain] : gains) result.push_back ({ key.first, key.second, gain });
+    return result;
+}
+
+juce::String AppCore::describeRoute (const RouteSetting& r)
+{
+    return r.input + " to " + r.output + " at " + juce::String (r.db, r.db == std::floor (r.db) ? 0 : 1) + " dB";
+}
+
+juce::String AppCore::routesSentence() const
+{
+    if (capture == nullptr) return "No audio is open.";
+    const auto iface = capture->getInterfaceName();
+    std::vector<RouteSetting> settings;
+    {
+        std::lock_guard<std::mutex> g (computerInputsLock);
+        if (auto it = routeSettings.find (iface); it != routeSettings.end()) settings = it->second;
+    }
+    if (settings.empty()) return "Nothing is routed on " + iface + ". Every input is still being captured.";
+    const auto inputs = capture->getInputNames(), outputs = capture->getOutputNames(), marked = computerInputsOn (iface);
+    juce::String s (settings.size() == 1 ? "One route. " : juce::String ((int) settings.size()) + " routes. ");
+    for (auto& r : settings)
+    {
+        s << describeRoute (r);
+        const auto in = channelsIn (r.input, inputs);
+        if (in.isEmpty() || channelsIn (r.output, outputs).isEmpty()) s << ", silent, that channel isn't open";
+        else
+            for (auto& n : in)
+                if (marked.contains (n)) { s << ", silent, it's the computer's own sound"; break; }
+        s << ". ";
+    }
+    return s.trimEnd();
 }
 
 void AppCore::findComputerInputs (bool firstTime)
@@ -1396,6 +1498,60 @@ void AppCore::registerCommands()
         add (c);
     }
 
+    {
+        Command c; c.id = "tracks.output"; c.name = "Play track through"; c.category = "Tracks";
+        c.description = "Chooses which outputs the selected track plays through. The default is the interface's main outputs.";
+        c.tags = { "routing", "output", "send to", "headphones", "cue" };
+        ArgSpec a; a.name = "output"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this]
+        {
+            juce::StringArray out ("Main outputs");
+            for (auto* wo : engine.getDeviceManager().getWaveOutputDevices()) out.add (wo->getName());
+            return out;
+        };
+        a.currentValue = [this] () -> juce::var
+        {
+            if (song == nullptr) return "Main outputs";
+            auto tracks = contentTracks (song->getEdit());
+            auto* t = tracks.isEmpty() ? nullptr : tracks[juce::jlimit (0, tracks.size() - 1, selectedTrack)];
+            auto* out = t != nullptr ? t->getOutput().getOutputDevice (false) : nullptr;
+            return out != nullptr && ! t->getOutput().usesDefaultAudioOut() ? juce::var (out->getName()) : juce::var ("Main outputs");
+        };
+        a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.undoable = true;
+        c.available = [this, needSong]
+        {
+            if (auto ok = needSong(); ! ok.enabled) return ok;
+            return contentTracks (song->getEdit()).isEmpty() ? Availability::no ("There are no tracks.") : Availability::yes();
+        };
+        c.run = [this] (const CommandArgs& args)
+        {
+            auto tracks = contentTracks (song->getEdit());
+            auto* t = tracks[juce::jlimit (0, tracks.size() - 1, selectedTrack)];
+            const auto choice = args["output"].toString();
+            if (choice == "Main outputs")
+            {
+                t->getOutput().setOutputToDefaultDevice (false);
+                if (onSongChanged) onSongChanged();
+                return CommandResult::done (t->getName() + " plays through the main outputs.");
+            }
+            auto& dm = engine.getDeviceManager();
+            for (auto* wo : dm.getWaveOutputDevices())
+                if (wo->getName() == choice)
+                {
+                    const auto id = wo->getDeviceID();
+                    if (! wo->isEnabled()) dm.setDeviceEnabled (*wo, true);   // rebuilds the list: wo is gone after this
+                    t->getOutput().setOutputToDeviceID (id);
+                    if (onSongChanged) onSongChanged();
+                    return CommandResult::done (t->getName() + " plays through " + choice + ".");
+                }
+            return CommandResult::failed ("There's no output called " + choice + ".");
+        };
+        add (c);
+    }
+
     // Reports
     {
         Command c; c.id = "report.position"; c.name = "Where am I"; c.category = "Reports"; c.isReport = true;
@@ -1512,6 +1668,119 @@ void AppCore::registerCommands()
             findComputerInputs (false);
             return CommandResult::done();
         };
+        add (c);
+    }
+    // Routing: any input to any output, live, song or no song.
+    {
+        Command c; c.id = "routing.send"; c.name = "Send input to output"; c.category = "Audio";
+        c.description = "Sends an input straight to an output so you hear it live, with or without a song open. "
+                        "It changes what you hear, never what's captured. Choosing the same input and output again changes its level. "
+                        "A mic near speakers can feed back, so start with headphones.";
+        c.tags = { "routing", "route", "monitor", "monitoring", "matrix", "patch", "headphones", "cue", "hear myself" };
+        ArgSpec in; in.name = "input"; in.type = ArgSpec::Type::choice;
+        in.liveChoices = [this] { return capture ? channelChoices (capture->getInputNames()) : juce::StringArray(); };
+        in.defaultValue = "";
+        ArgSpec out; out.name = "output"; out.type = ArgSpec::Type::choice;
+        out.liveChoices = [this] { return capture ? channelChoices (capture->getOutputNames()) : juce::StringArray(); };
+        out.defaultValue = "";
+        ArgSpec level; level.name = "level"; level.type = ArgSpec::Type::number; level.defaultValue = 0.0;
+        level.minimum = -60.0; level.maximum = 12.0; level.unit = "dB";
+        c.args = { in, out, level };
+        c.askForSettings = true;
+        c.available = [this]
+        {
+            if (capture == nullptr || capture->getInputNames().isEmpty()) return Availability::no ("No audio inputs are open.");
+            return capture->getOutputNames().isEmpty() ? Availability::no ("No audio outputs are open.") : Availability::yes();
+        };
+        c.run = [this] (const CommandArgs& args)
+        {
+            const RouteSetting r { args["input"].toString(), args["output"].toString(), (double) args["level"] };
+            const auto iface = capture->getInterfaceName();
+            const auto channels = channelsIn (r.input, capture->getInputNames());
+            if (channels.isEmpty()) return CommandResult::failed ("There's no input called " + r.input + ".");
+            if (channelsIn (r.output, capture->getOutputNames()).isEmpty()) return CommandResult::failed ("There's no output called " + r.output + ".");
+            const auto marked = computerInputsOn (iface);
+            for (auto& n : channels)
+                if (marked.contains (n))
+                    return CommandResult::failed (n + " carries the computer's own sound, so sending it to an output would feed back. "
+                                                  "If that's wrong, unmark it with Computer's own sound.");
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> g (computerInputsLock);
+                auto& list = routeSettings[iface];
+                for (auto& existing : list)
+                    if (existing.input == r.input && existing.output == r.output) { existing = r; changed = true; }
+                if (! changed) list.push_back (r);
+            }
+            capture->refreshRoutes();
+            saveAppSettings();
+            return CommandResult::done (describeRoute (r) + (changed ? ", changed." : ", on."), describeRoute (r) + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "routing.remove"; c.name = "Remove a route"; c.category = "Audio";
+        c.description = "Stops one input going to an output. Capture carries on.";
+        c.tags = { "routing", "route", "unroute", "monitor off", "disconnect" };
+        ArgSpec a; a.name = "route"; a.type = ArgSpec::Type::choice;
+        a.liveChoices = [this]
+        {
+            juce::StringArray out;
+            if (capture == nullptr) return out;
+            std::lock_guard<std::mutex> g (computerInputsLock);
+            if (auto it = routeSettings.find (capture->getInterfaceName()); it != routeSettings.end())
+                for (auto& r : it->second) out.add (describeRoute (r));
+            return out;
+        };
+        a.defaultValue = "";
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = [this, liveChoices = a.liveChoices] { return liveChoices().isEmpty() ? Availability::no ("Nothing is routed.") : Availability::yes(); };
+        c.run = [this] (const CommandArgs& args)
+        {
+            const auto wanted = args["route"].toString();
+            bool removed = false;
+            {
+                std::lock_guard<std::mutex> g (computerInputsLock);
+                auto& list = routeSettings[capture->getInterfaceName()];
+                for (auto it = list.begin(); it != list.end(); ++it)
+                    if (describeRoute (*it) == wanted) { list.erase (it); removed = true; break; }
+            }
+            if (! removed) return CommandResult::failed ("That route isn't there any more.");
+            capture->refreshRoutes();
+            saveAppSettings();
+            return CommandResult::done ("Removed " + wanted + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "routing.clear"; c.name = "Remove every route"; c.category = "Audio";
+        c.description = "Stops every input going to the outputs on this interface. Capture carries on.";
+        c.tags = { "routing", "panic", "silence", "monitor off", "feedback" };
+        c.available = [this]
+        {
+            if (capture == nullptr) return Availability::no ("Nothing is routed.");
+            std::lock_guard<std::mutex> g (computerInputsLock);
+            auto it = routeSettings.find (capture->getInterfaceName());
+            return it == routeSettings.end() || it->second.empty() ? Availability::no ("Nothing is routed.") : Availability::yes();
+        };
+        c.run = [this] (const CommandArgs&)
+        {
+            {
+                std::lock_guard<std::mutex> g (computerInputsLock);
+                routeSettings[capture->getInterfaceName()].clear();
+            }
+            capture->refreshRoutes();
+            saveAppSettings();
+            return CommandResult::done ("Every route removed.");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "routing.report"; c.name = "What's routed"; c.category = "Audio"; c.isReport = true;
+        c.description = "Says which inputs are going to which outputs on this interface. Changes nothing.";
+        c.tags = { "routing", "routes", "matrix", "monitoring" };
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (routesSentence()); };
         add (c);
     }
     {
