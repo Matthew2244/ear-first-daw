@@ -382,6 +382,7 @@ public:
             {
                 auto t = std::make_unique<juce::TextEditor>();
                 t->setText (value.toString(), false);
+                t->setSelectAllWhenFocused (true);   // typing replaces what's there; arrow keys keep it
                 t->onReturnKey = [this] { run(); };
                 t->onEscapeKey = [this] { if (close) close(); };
                 f.control = std::move (t);
