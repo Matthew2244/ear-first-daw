@@ -102,6 +102,15 @@ public:
     float textScale = 1.0f;
     // How the window looks: a Theme name ("Follow the system", "Light", "Dark", "High contrast").
     juce::String theme = "Follow the system";
+    // Moving: how far a step goes, and the frame rate for frames and timecode.
+    juce::String stepUnit = "Beat";
+    double frameRate = 30.0;
+    static juce::StringArray stepUnitNames();
+    tracktion::TimePosition moveBy (tracktion::TimePosition, const juce::String& unit, double count) const;
+    double stepSeconds() const;                 // how long the current step is, here
+    double currentSampleRate() const;
+    juce::String positionInEveryUnit() const;
+    std::optional<tracktion::TimePosition> parsePlace (const juce::String&) const;
     bool beatFlash = false;                     // the whole window's edge lights on each beat
     bool welcomeSeen = false;                   // the welcome window has been shown once
     std::function<void()> onViewChanged;        // theme, flash or text size changed: the window redraws
@@ -120,13 +129,14 @@ public:
     void saveAppSettings();
     void loadAppSettings();
 
-    static constexpr int keymapDefaultsVersion = 3;
+    static constexpr int keymapDefaultsVersion = 5;
 
 private:
     void timerCallback() override;
     void registerCommands();
     void registerSongCommands();           // moving around, markers, track basics (SongCommands.cpp)
-    void registerClipAndFileCommands();    // import, render, levels, clips (SongCommands.cpp)
+    void registerClipAndFileCommands();
+    void registerMovementCommands();       // any unit, go to anything, edges (SongCommands.cpp)    // import, render, levels, clips (SongCommands.cpp)
     tracktion::AudioTrack* selectedAudioTrack() const;
     std::shared_ptr<tracktion::EditRenderer::Handle> renderJob;
     bool clipWarnings = true;

@@ -329,6 +329,48 @@ int runSelfTest()
         run ("transport.rewind");
         stCheck (transport.getPosition().inSeconds() < tempo.toTime (tracktion::tempo::BarsAndBeats { 8, tracktion::BeatDuration::fromBeats (2.0) }).inSeconds(), "Rewind moves back.");
 
+        stSay ("Moving by anything");
+        transport.setPosition (tracktion::TimePosition());
+        press (stKey ('='));
+        stCheck (core->stepUnit == "Half a beat" && last().startsWith ("Step: Half a beat"), "= makes the step finer: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::rightKey));
+        stCheck (std::abs (tempo.toBeats (transport.getPosition()).inBeats() - 0.5) < 1.0e-6, "and Right then moves half a beat.");
+        CommandArgs unit; unit.set ("step", "Sample");
+        run ("transport.step-size", unit);
+        const double before = transport.getPosition().inSeconds();
+        press (stKey (juce::KeyPress::rightKey));
+        stCheck (std::abs ((transport.getPosition().inSeconds() - before) * core->currentSampleRate() - 1.0) < 0.01, "a step can be one sample.");
+        unit.set ("step", "Frame"); run ("transport.step-size", unit);
+        transport.setPosition (tracktion::TimePosition::fromSeconds (0.01));
+        press (stKey (juce::KeyPress::rightKey));
+        stCheck (std::abs (transport.getPosition().inSeconds() - 1.0 / 30.0) < 1.0e-6, "a frame step lands on the next frame.");
+        unit.set ("step", "Bar"); run ("transport.step-size", unit);
+        press (stKey ('-'));
+        stCheck (core->stepUnit == "2 bars", "- makes it coarser: \"" + last() + "\"");
+        unit.set ("step", "Beat"); run ("transport.step-size", unit);
+        struct Place { const char* typed; double seconds; };
+        for (auto& pl : { Place { "9.3", 17.0 }, Place { "bar 9 beat 3", 17.0 }, Place { "1:23.5", 83.5 }, Place { "83.5s", 83.5 }, Place { "250ms", 0.25 },
+                          Place { "48000 samples", 48000.0 / core->currentSampleRate() }, Place { "00:01:02:15", 62.5 }, Place { "5", 8.0 } })
+        {
+            CommandArgs g; g.set ("place", pl.typed);
+            run ("transport.go-to", g);
+            stCheck (std::abs (transport.getPosition().inSeconds() - pl.seconds) < 1.0e-6, juce::String ("Go to reads \"") + pl.typed + "\": " + last());
+        }
+        CommandArgs junk; junk.set ("place", "the chorus");
+        run ("transport.go-to", junk);
+        stCheck (last().startsWith ("I couldn't read"), "and says how to write it when it can't: \"" + last() + "\"");
+        transport.setPosition (tracktion::TimePosition::fromSeconds (1.0));
+        CommandArgs mv; mv.set ("amount", -250.0); mv.set ("unit", "Millisecond");
+        run ("transport.move", mv);
+        stCheck (std::abs (transport.getPosition().inSeconds() - 0.75) < 1.0e-6, "Move by -250 milliseconds: \"" + last() + "\"");
+        run ("report.position-detail");
+        stCheck (last().contains ("tick") && last().contains ("Sample 36000") && last().contains ("Timecode 00:00:00:22"), "Where am I, every way: \"" + last() + "\"");
+        transport.setPosition (tracktion::TimePosition());
+        press (stKey ('e'));
+        stCheck (last().isNotEmpty(), "E goes to the next edge: \"" + last() + "\"");
+        press (stKey ('"', shift));
+        stCheck (last().contains ("tempo or meter"), "Shift-apostrophe looks for the next tempo or meter change: \"" + last() + "\"");
+
         stSay ("Markers");
         run ("markers.next");
         stCheck (last().contains ("no markers") || last().contains ("M adds"), "with no markers, Next marker says so: \"" + last() + "\"");
@@ -515,6 +557,19 @@ int runSelfTest()
                  "the message history holds what was said, newest last: \"" + mc->history.getNameForRow (mc->history.getNumRows() - 1) + "\"");
         stCheck (mc->tracks.getRowHeight() == mc->timeline.laneHeight() && mc->timeline.laneTop() == mc->tracks.getY() - mc->timeline.getY(), "timeline lanes line up with the track list rows.");
 
+        {
+            auto& tr = core->session()->getEdit().getTransport();
+            tr.setPosition (tracktion::TimePosition::fromSeconds (2.0));
+            core->selectedTrack = 1;
+            CommandArgs imp; imp.set ("file", root.getChildFile ("Four Second Tone.wav").getFullPathName());
+            core->commands().run ("file.import-audio", imp);
+            core->selectedTrack = 0;
+            tr.setPosition (tracktion::TimePosition::fromSeconds (3.0));
+            mc->timeline.repaint();
+            mc->createComponentSnapshot (mc->getLocalBounds());   // asks for the waveforms
+            for (int i = 0; i < 200 && mc->timeline.waveformsReady() < 1.0; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+            stCheck (mc->timeline.waveformsReady() >= 1.0, "the timeline draws each clip's waveform (" + juce::String (mc->timeline.waveformsReady(), 2) + " made).");
+        }
         auto snapDir = juce::SystemStats::getEnvironmentVariable ("EARFIRST_SNAPSHOTS", {});
         for (auto theme : Theme::choices())
         {

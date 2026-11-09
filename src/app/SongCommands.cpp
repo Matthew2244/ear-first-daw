@@ -479,7 +479,7 @@ void AppCore::registerSongCommands()
         Command c; c.id = "tracks.mute"; c.name = "Mute"; c.category = "Tracks";
         c.description = "Mutes or unmutes the selected track.";
         c.tags = { "silence" };
-        c.onWord = "muted"; c.offWord = "unmuted"; c.sayNameWithState = false;
+        c.onWord = "Muted"; c.offWord = "Unmuted"; c.sayNameWithState = false;
         c.undoable = true;
         c.available = needTrack;
         c.toggleState = [this] { auto* t = selectedAudioTrack(); return t != nullptr ? std::optional<bool> (t->isMuted (false)) : std::optional<bool>(); };
@@ -495,7 +495,7 @@ void AppCore::registerSongCommands()
     {
         Command c; c.id = "tracks.solo"; c.name = "Solo"; c.category = "Tracks";
         c.description = "Solos the selected track, or takes the solo off.";
-        c.onWord = "soloed"; c.offWord = "solo off"; c.sayNameWithState = false;
+        c.onWord = "Soloed"; c.offWord = "Solo off"; c.sayNameWithState = false;
         c.undoable = true;
         c.available = needTrack;
         c.toggleState = [this] { auto* t = selectedAudioTrack(); return t != nullptr ? std::optional<bool> (t->isSolo (false)) : std::optional<bool>(); };
@@ -959,6 +959,421 @@ void AppCore::registerClipAndFileCommands()
             songChanged();
             return CommandResult::done ("Moved to " + placeText (e, to) + ".");
         };
+        add (c);
+    }
+}
+
+//==============================================================================
+// Moving by any unit at all.
+namespace
+{
+enum class UnitKind { seconds, samples, frames, beats, bars };
+struct Unit { const char* name; UnitKind kind; double size; const char* plural; };
+
+// Finest first, so finer and coarser walk this list.
+const std::vector<Unit>& units()
+{
+    static const std::vector<Unit> u {
+        { "Sample",              UnitKind::samples, 1,        "samples" },
+        { "Tick",                UnitKind::beats,   1.0 / 960, "ticks" },
+        { "Millisecond",         UnitKind::seconds, 0.001,    "milliseconds" },
+        { "10 milliseconds",     UnitKind::seconds, 0.01,     "lots of 10 milliseconds" },
+        { "Frame",               UnitKind::frames,  1,        "frames" },
+        { "Sixteenth of a beat", UnitKind::beats,   1.0 / 16, "sixteenths of a beat" },
+        { "Eighth of a beat",    UnitKind::beats,   1.0 / 8,  "eighths of a beat" },
+        { "100 milliseconds",    UnitKind::seconds, 0.1,      "lots of 100 milliseconds" },
+        { "Sixth of a beat",     UnitKind::beats,   1.0 / 6,  "sixths of a beat" },
+        { "Quarter of a beat",   UnitKind::beats,   0.25,     "quarters of a beat" },
+        { "Third of a beat",     UnitKind::beats,   1.0 / 3,  "thirds of a beat" },
+        { "Half a beat",         UnitKind::beats,   0.5,      "half beats" },
+        { "Beat",                UnitKind::beats,   1,        "beats" },
+        { "Second",              UnitKind::seconds, 1,        "seconds" },
+        { "Bar",                 UnitKind::bars,    1,        "bars" },
+        { "2 bars",              UnitKind::bars,    2,        "lots of 2 bars" },
+        { "5 seconds",           UnitKind::seconds, 5,        "lots of 5 seconds" },
+        { "4 bars",              UnitKind::bars,    4,        "lots of 4 bars" },
+        { "10 seconds",          UnitKind::seconds, 10,       "lots of 10 seconds" },
+        { "8 bars",              UnitKind::bars,    8,        "lots of 8 bars" },
+        { "30 seconds",          UnitKind::seconds, 30,       "lots of 30 seconds" },
+        { "16 bars",             UnitKind::bars,    16,       "lots of 16 bars" },
+        { "Minute",              UnitKind::seconds, 60,       "minutes" },
+    };
+    return u;
+}
+
+const Unit* findUnit (const juce::String& name)
+{
+    for (auto& u : units()) if (name.equalsIgnoreCase (u.name)) return &u;
+    return nullptr;
+}
+
+// Steps of `size` along a line, snapping to the grid first: from between two
+// lines, the first step lands on the nearer line in that direction.
+double stepOnGrid (double at, double size, double count)
+{
+    if (count == 0) return at;
+    const double eps = 1.0e-9 * std::max (1.0, std::abs (at / size));
+    const double index = at / size;
+    const double whole = count > 0 ? std::floor (index + eps) + count : std::ceil (index - eps) + count;
+    return whole * size;
+}
+} // namespace
+
+juce::StringArray AppCore::stepUnitNames()
+{
+    juce::StringArray s;
+    for (auto& u : units()) s.add (u.name);
+    return s;
+}
+
+double AppCore::currentSampleRate() const
+{
+    if (auto* d = const_cast<tracktion::Engine&> (engine).getDeviceManager().deviceManager.getCurrentAudioDevice())
+        return d->getCurrentSampleRate();
+    return 48000.0;
+}
+
+TimePosition AppCore::moveBy (TimePosition from, const juce::String& unitName, double count) const
+{
+    const auto* u = findUnit (unitName);
+    if (u == nullptr || song == nullptr) return from;
+    auto& tempo = song->getEdit().tempoSequence;
+    switch (u->kind)
+    {
+        case UnitKind::seconds: return TimePosition::fromSeconds (std::max (0.0, stepOnGrid (from.inSeconds(), u->size, count)));
+        case UnitKind::samples:
+        {
+            const double rate = currentSampleRate();
+            return TimePosition::fromSeconds (std::max (0.0, stepOnGrid (from.inSeconds() * rate, 1.0, count) / rate));
+        }
+        case UnitKind::frames:  return TimePosition::fromSeconds (std::max (0.0, stepOnGrid (from.inSeconds(), 1.0 / frameRate, count)));
+        case UnitKind::beats:   return tempo.toTime (BeatPosition::fromBeats (std::max (0.0, stepOnGrid (tempo.toBeats (from).inBeats(), u->size, count))));
+        case UnitKind::bars:
+        {
+            // Bars can change length with the meter, so they're counted, not measured.
+            const auto here = tempo.toBarsAndBeats (from);
+            const int n = juce::roundToInt (u->size * count);
+            const bool onLine = here.beats.inBeats() < 1.0e-6 && here.bars % juce::roundToInt (u->size) == 0;
+            int bar = here.bars - (here.bars % juce::roundToInt (u->size));
+            if (n > 0) bar += n;
+            else if (onLine) bar += n;
+            else bar += n + juce::roundToInt (u->size);
+            tempo::BarsAndBeats to; to.bars = std::max (0, bar);
+            return tempo.toTime (to);
+        }
+    }
+    return from;
+}
+
+double AppCore::stepSeconds() const
+{
+    if (song == nullptr) return 1.0;
+    const auto now = song->getEdit().getTransport().getPosition();
+    const auto next = moveBy (now, stepUnit, 1.0);
+    return std::max (1.0 / currentSampleRate(), (next - now).inSeconds());
+}
+
+juce::String AppCore::positionInEveryUnit() const
+{
+    if (song == nullptr) return "No song is open.";
+    auto& e = song->getEdit();
+    const auto t = e.getTransport().getPosition();
+    const auto bb = e.tempoSequence.toBarsAndBeats (t);
+    const double beatInBar = bb.beats.inBeats();
+    const int ticks = juce::roundToInt ((beatInBar - std::floor (beatInBar)) * 960.0);
+    const double secs = t.inSeconds();
+    const int h = (int) (secs / 3600), m = (int) (secs / 60) % 60;
+    const double s = secs - h * 3600 - m * 60;
+    const auto frames = (int) std::floor ((secs - std::floor (secs)) * frameRate + 1.0e-6);
+    juce::String clock = (h > 0 ? juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2) : juce::String (m)) + ":" + juce::String (s, 3).paddedLeft ('0', 6);
+    juce::String tc = juce::String (h).paddedLeft ('0', 2) + ":" + juce::String (m).paddedLeft ('0', 2) + ":" + juce::String ((int) s).paddedLeft ('0', 2) + ":" + juce::String (frames).paddedLeft ('0', 2);
+    return "Bar " + juce::String (bb.bars + 1) + ", beat " + juce::String ((int) std::floor (beatInBar) + 1) + ", tick " + juce::String (ticks) + " of 960. "
+         + clock + ". Sample " + juce::String ((juce::int64) std::llround (secs * currentSampleRate())) + " at " + juce::String ((int) currentSampleRate()) + " hertz. "
+         + "Timecode " + tc + " at " + juce::String (frameRate, 3).trimCharactersAtEnd ("0").trimCharactersAtEnd (".") + " frames.";
+}
+
+// "9", "9.3", "bar 9 beat 3", "1:23.5", "1:02:03", "83.2s", "250ms", "48000 samples", "00:01:02:12" (timecode).
+std::optional<TimePosition> AppCore::parsePlace (const juce::String& typed) const
+{
+    if (song == nullptr) return {};
+    auto& tempo = song->getEdit().tempoSequence;
+    auto text = typed.trim().toLowerCase();
+    if (text.isEmpty()) return {};
+    const auto number = [] (const juce::String& s) -> std::optional<double>
+    {
+        auto t = s.trim();
+        if (t.isEmpty() || ! t.containsOnly ("0123456789.-")) return {};
+        return t.getDoubleValue();
+    };
+    if (text.endsWith ("samples") || text.endsWith ("sample"))
+        if (auto n = number (text.upToFirstOccurrenceOf ("sample", false, false))) return TimePosition::fromSeconds (std::max (0.0, *n / currentSampleRate()));
+    if (text.endsWith ("ms"))
+        if (auto n = number (text.dropLastCharacters (2))) return TimePosition::fromSeconds (std::max (0.0, *n / 1000.0));
+    for (auto suffix : { "seconds", "second", "secs", "sec", "s" })
+        if (text.endsWith (suffix))
+            if (auto n = number (text.dropLastCharacters ((int) strlen (suffix)))) return TimePosition::fromSeconds (std::max (0.0, *n));
+    if (text.containsChar (':'))
+    {
+        auto parts = juce::StringArray::fromTokens (text, ":", "");
+        for (auto& p : parts) if (! number (p)) return {};
+        double secs = 0;
+        if (parts.size() == 4)   // timecode
+            secs = parts[0].getDoubleValue() * 3600 + parts[1].getDoubleValue() * 60 + parts[2].getDoubleValue() + parts[3].getDoubleValue() / frameRate;
+        else
+            for (auto& p : parts) secs = secs * 60 + p.getDoubleValue();
+        return TimePosition::fromSeconds (std::max (0.0, secs));
+    }
+    // Bars and beats: "bar 9 beat 3", "9 3", "9.3", or just "9".
+    auto words = text.replace ("bar", " ").replace ("beat", " ").replace (",", " ").replace (".", " ");
+    auto nums = juce::StringArray::fromTokens (words, " ", "");
+    nums.removeEmptyStrings();
+    if (nums.isEmpty() || nums.size() > 2) return {};
+    for (auto& n : nums) if (! n.containsOnly ("0123456789")) return {};
+    tempo::BarsAndBeats to;
+    to.bars = std::max (0, nums[0].getIntValue() - 1);
+    to.beats = BeatDuration::fromBeats (nums.size() > 1 ? std::max (0, nums[1].getIntValue() - 1) : 0);
+    return tempo.toTime (to);
+}
+
+void AppCore::registerMovementCommands()
+{
+    auto add = [this] (Command c)
+    {
+        auto r = commandList.add (std::move (c));
+        jassert (r.wasOk());
+        juce::ignoreUnused (r);
+    };
+    auto needSong = [this] { return song == nullptr ? Availability::no ("No song is open. Press Command-N for a new one.") : Availability::yes(); };
+    auto arrive = [this] (TimePosition t, juce::String prefix = {})
+    {
+        song->getEdit().getTransport().setPosition (std::max (TimePosition(), t));
+        auto s = positionSentence();
+        return prefix.isEmpty() ? CommandResult::done (s) : CommandResult::done (prefix + " " + s, prefix);
+    };
+
+    auto unitArg = [] (const char* name, juce::String def)
+    {
+        ArgSpec a; a.name = name; a.type = ArgSpec::Type::choice; a.choices = AppCore::stepUnitNames(); a.defaultValue = def;
+        return a;
+    };
+    {
+        Command c; c.id = "transport.step-forward"; c.name = "Step forward"; c.category = "Transport";
+        c.description = "Moves the playhead forward one step. The step can be anything from a sample to a minute or 16 bars: Finer step and Coarser step change it.";
+        c.tags = { "move", "nudge", "right", "navigate" };
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs&) { return arrive (moveBy (song->getEdit().getTransport().getPosition(), stepUnit, 1)); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.step-back"; c.name = "Step back"; c.category = "Transport";
+        c.description = "Moves the playhead back one step.";
+        c.tags = { "move", "nudge", "left", "navigate" };
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs&) { return arrive (moveBy (song->getEdit().getTransport().getPosition(), stepUnit, -1)); };
+        add (c);
+    }
+    auto changeStep = [this] (int direction)
+    {
+        auto names = stepUnitNames();
+        const int i = juce::jlimit (0, names.size() - 1, names.indexOf (stepUnit) + direction);
+        if (names[i] == stepUnit) return CommandResult::done ((direction < 0 ? "Finest step already: " : "Coarsest step already: ") + stepUnit + ".");
+        stepUnit = names[i];
+        saveAppSettings();
+        if (onViewChanged) onViewChanged();
+        return CommandResult::done ("Step: " + stepUnit + ".", stepUnit + ".");
+    };
+    {
+        Command c; c.id = "transport.finer-step"; c.name = "Finer step"; c.category = "Transport";
+        c.description = "Makes each step smaller, down to one sample, and zooms the timeline in.";
+        c.tags = { "zoom in", "resolution", "smaller", "precision" };
+        c.run = [changeStep] (const CommandArgs&) { return changeStep (-1); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.coarser-step"; c.name = "Coarser step"; c.category = "Transport";
+        c.description = "Makes each step bigger, up to a minute or 16 bars, and zooms the timeline out.";
+        c.tags = { "zoom out", "resolution", "bigger" };
+        c.run = [changeStep] (const CommandArgs&) { return changeStep (1); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.step-size"; c.name = "Step size"; c.category = "Transport";
+        c.description = "Chooses how far each step moves: samples, ticks, milliseconds, frames, parts of a beat, beats, seconds, bars or minutes.";
+        c.tags = { "grid", "resolution", "nudge", "unit" };
+        auto a = unitArg ("step", "Beat");
+        a.currentValue = [this]() -> juce::var { return stepUnit; };
+        c.args = { a };
+        c.askForSettings = true;
+        c.run = [this] (const CommandArgs& args)
+        {
+            stepUnit = args["step"].toString();
+            saveAppSettings();
+            if (onViewChanged) onViewChanged();
+            return CommandResult::done ("Step: " + stepUnit + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.move"; c.name = "Move by"; c.category = "Transport";
+        c.description = "Moves the playhead by any amount of any unit: 3 bars, -250 milliseconds, 12 frames, 480 samples.";
+        c.tags = { "nudge", "offset", "jump", "relative" };
+        ArgSpec amount; amount.name = "amount"; amount.defaultValue = 1.0;
+        auto unit = unitArg ("unit", "Bar");
+        unit.currentValue = [this]() -> juce::var { return stepUnit; };
+        c.args = { amount, unit };
+        c.askForSettings = true;
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs& args)
+        {
+            const double amount = args["amount"];
+            const auto unit = args["unit"].toString();
+            const auto* u = findUnit (unit);
+            if (u == nullptr) return CommandResult::failed ("There's no unit called " + unit + ".");
+            auto at = song->getEdit().getTransport().getPosition();
+            // Whole steps snap to the grid; a fraction is an exact offset.
+            if (amount == std::floor (amount)) at = moveBy (at, unit, amount);
+            else
+            {
+                const auto start = moveBy (at, unit, 0);
+                const auto one = moveBy (at, unit, amount >= 0 ? 1 : -1);
+                at = at + (one - start) * std::abs (amount);
+            }
+            return arrive (at);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.go-to"; c.name = "Go to"; c.category = "Transport";
+        c.description = "Moves the playhead to a place written any way: 9 or 9.3 for a bar and beat, 1:23.5 for minutes and seconds, 83s, 250ms, 48000 samples, or timecode like 00:01:02:12.";
+        c.tags = { "jump", "locate", "time", "timecode", "samples", "position" };
+        ArgSpec a; a.name = "place"; a.type = ArgSpec::Type::text; a.defaultValue = "";
+        a.currentValue = [this]() -> juce::var
+        {
+            if (song == nullptr) return "";
+            auto bb = song->getEdit().tempoSequence.toBarsAndBeats (song->getEdit().getTransport().getPosition());
+            return juce::String (bb.bars + 1) + "." + juce::String (bb.getWholeBeats() + 1);
+        };
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs& args)
+        {
+            auto where = parsePlace (args["place"].toString());
+            if (! where) return CommandResult::failed ("I couldn't read \"" + args["place"].toString() + "\" as a place. Try 9.3, 1:23.5, 83s, 250ms, 48000 samples or 00:01:02:12.");
+            return arrive (*where);
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "report.position-detail"; c.name = "Where am I, every way"; c.category = "Reports"; c.isReport = true;
+        c.description = "Says the playhead's place as bar, beat and tick, minutes and seconds, the sample, and timecode. Changes nothing.";
+        c.tags = { "position", "samples", "timecode", "ticks", "exact" };
+        c.available = needSong;
+        c.run = [this] (const CommandArgs&) { return CommandResult::done (positionInEveryUnit()); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.frame-rate"; c.name = "Frame rate"; c.category = "Transport";
+        c.description = "The frame rate for stepping by frames and for timecode, to match a video.";
+        c.tags = { "video", "fps", "timecode", "film" };
+        ArgSpec a; a.name = "frames per second"; a.type = ArgSpec::Type::choice;
+        a.choices = { "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60" };
+        a.defaultValue = "30";
+        a.currentValue = [this]() -> juce::var { return juce::String (frameRate, 3).trimCharactersAtEnd ("0").trimCharactersAtEnd ("."); };
+        c.args = { a };
+        c.askForSettings = true;
+        c.run = [this] (const CommandArgs& args)
+        {
+            frameRate = args["frames per second"].toString().getDoubleValue();
+            if (frameRate <= 0) frameRate = 30.0;
+            saveAppSettings();
+            return CommandResult::done (args["frames per second"].toString() + " frames a second.");
+        };
+        add (c);
+    }
+
+    // Edges: anything with a start or end, on any track, and every marker,
+    // loop point and tempo or meter change, nearest first.
+    auto edges = [this] (bool changesOnly)
+    {
+        std::vector<std::pair<double, juce::String>> out;
+        auto& e = song->getEdit();
+        auto& tempo = e.tempoSequence;
+        if (! changesOnly)
+        {
+            for (auto* t : contentTracks (e))
+                for (auto* clip : t->getClips())
+                {
+                    out.push_back ({ clip->getPosition().getStart().inSeconds(), "Start of " + clip->getName() + " on " + t->getName() });
+                    out.push_back ({ clip->getPosition().getEnd().inSeconds(), "End of " + clip->getName() + " on " + t->getName() });
+                }
+            for (auto* m : e.getMarkerManager().getMarkers())
+                out.push_back ({ m->getPosition().getStart().inSeconds(), m->getName() });
+            if (e.getTransport().looping.get())
+            {
+                auto lr = e.getTransport().getLoopRange();
+                out.push_back ({ lr.getStart().inSeconds(), "Loop start" });
+                out.push_back ({ lr.getEnd().inSeconds(), "Loop end" });
+            }
+            out.push_back ({ 0.0, "Start of the song" });
+            out.push_back ({ e.getLength().inSeconds(), "End of the song" });
+        }
+        for (int i = 1; i < tempo.getNumTempos(); ++i)
+            if (auto* t = tempo.getTempo (i))
+                out.push_back ({ t->getStartTime().inSeconds(), "Tempo " + juce::String (t->getBpm(), 1).trimCharactersAtEnd ("0").trimCharactersAtEnd (".") });
+        for (int i = 1; i < tempo.getNumTimeSigs(); ++i)
+            if (auto* ts = tempo.getTimeSig (i))
+                out.push_back ({ tempo.toTime (ts->getStartBeat()).inSeconds(), "Time signature " + juce::String (ts->numerator.get()) + "/" + juce::String (ts->denominator.get()) });
+        return out;
+    };
+    auto toEdge = [this, edges, arrive] (int direction, bool changesOnly)
+    {
+        const auto now = song->getEdit().getTransport().getPosition().inSeconds();
+        auto list = edges (changesOnly);
+        double best = direction > 0 ? 1.0e300 : -1.0;
+        juce::StringArray names;
+        for (auto& [at, name] : list)
+        {
+            const bool ahead = direction > 0 ? at > now + 1.0e-6 : at < now - 1.0e-6;
+            if (! ahead) continue;
+            if (std::abs (at - best) < 1.0e-6) names.addIfNotAlreadyThere (name);
+            else if (direction > 0 ? at < best : at > best) { best = at; names = { name }; }
+        }
+        if (names.isEmpty())
+            return CommandResult::done (changesOnly ? (direction > 0 ? "No more tempo or meter changes." : "No tempo or meter changes before this.")
+                                                    : (direction > 0 ? "Nothing more after this." : "Nothing before this."));
+        return arrive (TimePosition::fromSeconds (best), names.joinIntoString (", ") + ".");
+    };
+    {
+        Command c; c.id = "transport.next-edge"; c.name = "Next edge"; c.category = "Transport";
+        c.description = "Moves to the next place something starts or ends: a clip on any track, a marker, the loop, a tempo or meter change, and says what it is.";
+        c.tags = { "transient", "boundary", "item", "region", "tab" };
+        c.available = needSong;
+        c.run = [toEdge] (const CommandArgs&) { return toEdge (1, false); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.previous-edge"; c.name = "Previous edge"; c.category = "Transport";
+        c.description = "Moves to the previous place something starts or ends, and says what it is.";
+        c.tags = { "transient", "boundary", "item", "region" };
+        c.available = needSong;
+        c.run = [toEdge] (const CommandArgs&) { return toEdge (-1, false); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.next-change"; c.name = "Next tempo or meter change"; c.category = "Transport";
+        c.description = "Moves to the next tempo or time signature change.";
+        c.tags = { "tempo", "time signature", "meter" };
+        c.available = needSong;
+        c.run = [toEdge] (const CommandArgs&) { return toEdge (1, true); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.previous-change"; c.name = "Previous tempo or meter change"; c.category = "Transport";
+        c.description = "Moves to the previous tempo or time signature change.";
+        c.tags = { "tempo", "time signature", "meter" };
+        c.available = needSong;
+        c.run = [toEdge] (const CommandArgs&) { return toEdge (-1, true); };
         add (c);
     }
 }

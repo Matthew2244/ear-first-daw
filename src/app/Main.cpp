@@ -71,6 +71,13 @@ KeyChord chordFromKeyPress (const juce::KeyPress& k)
     if (ch == ',') { c.key = "Comma"; return c; }
     if (ch == '<') { c.key = "Comma"; return c; }      // Shift+comma arrives as <
     if (ch == '>') { c.key = "."; return c; }
+    // Other shifted characters on a US layout arrive as the character itself;
+    // the binding names the key, with Shift already in the modifiers.
+    static const std::pair<juce::juce_wchar, const char*> shifted[] = {
+        { '"', "'" }, { ':', ";" }, { '{', "[" }, { '}', "]" }, { '?', "/" }, { '+', "=" }, { '_', "-" }, { '|', "\\" }, { '~', "`" },
+        { '!', "1" }, { '@', "2" }, { '#', "3" }, { '$', "4" }, { '%', "5" }, { '^', "6" }, { '&', "7" }, { '*', "8" }, { '(', "9" }, { ')', "0" } };
+    for (auto& [from, to] : shifted)
+        if (ch == from) { c.key = to; return c; }
     if (ch > 32 && ch < 127) c.key = juce::String::charToString (ch).toUpperCase();
     return c;
 }
@@ -479,7 +486,7 @@ private:
     juce::String id;
     std::function<void()> close;
     juce::Label about;
-    juce::TextButton ok, cancel { "Cancel" };
+    PressButton ok, cancel { "Cancel" };
 };
 
 //==============================================================================
@@ -575,6 +582,7 @@ public:
         juce::LookAndFeel::setDefaultLookAndFeel (&look);   // dialogs, menus and forms too
         if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setBackgroundColour (look.theme.background);
         sendLookAndFeelChange();
+        transportBar.refresh();
     }
 
     void resized() override
@@ -584,7 +592,7 @@ public:
         transportInfo.setFont (juce::FontOptions (18.0f * s));
         captureInfo.setFont (juce::FontOptions (16.0f * s));
         status.setFont (juce::FontOptions (16.0f * s));
-        tracks.setRowHeight (juce::roundToInt (30 * s));
+        tracks.setRowHeight (juce::roundToInt (48 * s));
 
         transportBar.scale = timeline.scale = meterStrip.scale = history.scale = s;
         tracksHeader.setFont (juce::FontOptions (14.0f * s, juce::Font::bold));
@@ -655,6 +663,7 @@ public:
 
     void refresh()
     {
+        timeline.songChanged();
         output.screenChanged();
         resized();
         tracks.updateContent();
@@ -951,7 +960,13 @@ public:
         o.useNativeTitleBar = true;
         o.resizable = true;
         welcomeWindow = o.launchAsync();
-        w->text.grabKeyboardFocus();
+        // Focus can only land once the window is really up and in front.
+        juce::Component::SafePointer<WelcomeComponent> safe (w);
+        juce::Timer::callAfterDelay (250, [this, safe]
+        {
+            if (welcomeWindow != nullptr) welcomeWindow->toFront (true);
+            if (safe != nullptr) safe->text.grabKeyboardFocus();
+        });
     }
 
     void anotherInstanceStarted (const juce::String& args) override   { runCommandsFrom (args, 0); }

@@ -182,9 +182,23 @@ public:
 };
 
 //==============================================================================
+// Space presses a focused button, as in every Mac and Windows app; a JUCE
+// button only answers Return by itself.
+class PressButton : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        if (isEnabled() && k == juce::KeyPress (juce::KeyPress::spaceKey)) { triggerClick(); return true; }
+        return juce::TextButton::keyPressed (k);
+    }
+};
+
+//==============================================================================
 // A button that runs a command, says the command's name and key, and shows a
 // toggle's state in its words as well as its colour.
-class CommandButton : public juce::TextButton
+class CommandButton : public PressButton
 {
 public:
     CommandButton (AppCore& c, juce::String commandId, juce::String label)
@@ -221,6 +235,7 @@ public:
         setDescription (can ? cmd->description : cmd->description + " Not available now: " + cmd->available().reason);
     }
 
+    void lookAndFeelChanged() override         { refresh(); }   // a new theme: colours follow at once
     std::function<juce::String()> labelFor;    // words that change: Play / Stop
     const juce::String& commandId() const      { return id; }
 
@@ -393,15 +408,35 @@ public:
     int rulerHeight = 34;
     float scale = 1.0f;
 
+    // The view zooms with the step: about 64 steps across, so a finer step is a
+    // closer look. It pages along to keep the playhead in sight.
     double visibleSeconds() const
     {
         auto* s = core.session();
         if (s == nullptr) return 30.0;
-        auto& e = s->getEdit();
-        return std::max ({ 30.0, e.getLength().inSeconds() * 1.08 + 4.0, e.getTransport().getPosition().inSeconds() + 8.0 });
+        return juce::jlimit (0.002, 24.0 * 3600.0, core.stepSeconds() * 64.0);
     }
-    float xFor (double seconds) const     { return (float) (seconds / visibleSeconds() * (getWidth() - 2)) + 1.0f; }
-    double secondsAt (float x) const      { return juce::jmax (0.0, (double) (x - 1.0f) / (getWidth() - 2) * visibleSeconds()); }
+    void follow()
+    {
+        auto* s = core.session();
+        if (s == nullptr) { viewStart = 0; return; }
+        const double now = s->getEdit().getTransport().getPosition().inSeconds(), w = visibleSeconds();
+        if (w != lastWindow) { lastWindow = w; viewStart = std::max (0.0, now - w * 0.25); }
+        if (now < viewStart || now > viewStart + w * 0.95) viewStart = std::max (0.0, now - w * 0.25);
+    }
+    float xFor (double seconds) const     { return (float) ((seconds - viewStart) / visibleSeconds() * (getWidth() - 2)) + 1.0f; }
+    double secondsAt (float x) const      { return juce::jmax (0.0, viewStart + (double) (x - 1.0f) / (getWidth() - 2) * visibleSeconds()); }
+    double viewStart = 0, lastWindow = 0;
+
+    static juce::String timeLabel (double secs, double interval)
+    {
+        const int mins = (int) (secs / 60.0);
+        const double rest = secs - mins * 60;
+        const int places = interval < 0.01 ? 3 : interval < 0.1 ? 2 : interval < 1 ? 1 : 0;
+        auto s = juce::String (rest, places);
+        if (mins > 0 || interval >= 1) return juce::String (mins) + ":" + (rest < 10 ? "0" : "") + s;
+        return s + "s";
+    }
 
     void paint (juce::Graphics& g) override
     {
@@ -418,23 +453,55 @@ public:
         }
         auto& e = s->getEdit();
         auto& tempo = e.tempoSequence;
+        follow();
         const auto ruler = getLocalBounds().removeFromTop (rulerHeight);
-
-        // Bars: a line each, numbered as often as there's room.
-        g.setFont (juce::FontOptions (13.0f * scale));
         const double secs = visibleSeconds();
-        const int lastBar = tempo.toBarsAndBeats (tracktion::TimePosition::fromSeconds (secs)).bars + 1;
-        const float barWidth = xFor (tempo.toTime (tracktion::tempo::BarsAndBeats { 1, {} }).inSeconds()) - xFor (0.0);
-        const int every = std::max (1, (int) std::ceil (36.0f * scale / std::max (1.0f, barWidth)));
-        for (int bar = 0; bar <= lastBar; ++bar)
-        {
-            const float x = xFor (tempo.toTime (tracktion::tempo::BarsAndBeats { bar, {} }).inSeconds());
-            g.setColour (t.outline.withAlpha (bar % every == 0 ? 0.6f : 0.25f));
-            g.drawVerticalLine (juce::roundToInt (x), (float) ruler.getBottom() - 8.0f, (float) getHeight());
-            if (bar % every == 0)
+        const auto endOfView = tracktion::TimePosition::fromSeconds (viewStart + secs);
+
+        // Bars along the top half of the ruler, numbered as often as there's
+        // room; beats too once they're far enough apart to see.
+        g.setFont (juce::FontOptions (13.0f * scale));
+        const int firstBar = tempo.toBarsAndBeats (tracktion::TimePosition::fromSeconds (viewStart)).bars;
+        const int lastBar = tempo.toBarsAndBeats (endOfView).bars + 1;
+        const float barWidth = xFor (tempo.toTime (tracktion::tempo::BarsAndBeats { firstBar + 1, {} }).inSeconds())
+                             - xFor (tempo.toTime (tracktion::tempo::BarsAndBeats { firstBar, {} }).inSeconds());
+        const int every = std::max (1, (int) std::ceil (36.0f * scale / std::max (0.01f, barWidth)));
+        const float half = (float) ruler.getCentreY();
+        if (lastBar - firstBar < 4000)
+            for (int bar = firstBar; bar <= lastBar; ++bar)
             {
+                const float x = xFor (tempo.toTime (tracktion::tempo::BarsAndBeats { bar, {} }).inSeconds());
+                g.setColour (t.outline.withAlpha (bar % every == 0 ? 0.6f : 0.25f));
+                g.drawVerticalLine (juce::roundToInt (x), half - 6.0f, (float) getHeight());
+                if (bar % every == 0)
+                {
+                    g.setColour (t.text);
+                    g.drawText (juce::String (bar + 1), juce::Rectangle<float> (x + 3, (float) ruler.getY(), 60 * scale, half - ruler.getY()),
+                                juce::Justification::centredLeft, false);
+                }
+            }
+        const double beatPx = xFor (tempo.toTime (tracktion::BeatPosition::fromBeats (tempo.toBeats (tracktion::TimePosition::fromSeconds (viewStart)).inBeats() + 1)).inSeconds()) - xFor (viewStart);
+        if (beatPx > 14)
+        {
+            const double b0 = std::floor (tempo.toBeats (tracktion::TimePosition::fromSeconds (viewStart)).inBeats());
+            const double b1 = tempo.toBeats (endOfView).inBeats();
+            g.setColour (t.outline.withAlpha (0.15f));
+            for (double b = b0; b <= b1 && b - b0 < 4000; b += 1)
+                g.drawVerticalLine (juce::roundToInt (xFor (tempo.toTime (tracktion::BeatPosition::fromBeats (b)).inSeconds())), half, (float) getHeight());
+        }
+        // Time along the bottom half, at a round interval that leaves room to read.
+        {
+            static const double nice[] = { 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600 };
+            double interval = nice[std::size (nice) - 1];
+            for (double n : nice) if (n / secs * getWidth() >= 80.0 * scale) { interval = n; break; }
+            g.setFont (juce::FontOptions (12.0f * scale));
+            for (double at = std::ceil (viewStart / interval) * interval; at <= viewStart + secs; at += interval)
+            {
+                const float x = xFor (at);
+                g.setColour (t.outline.withAlpha (0.6f));
+                g.drawVerticalLine (juce::roundToInt (x), (float) ruler.getBottom() - 5.0f, (float) ruler.getBottom());
                 g.setColour (t.dim);
-                g.drawText (juce::String (bar + 1), juce::Rectangle<float> (x + 3, (float) ruler.getBottom() - 18 * scale, 60 * scale, 16 * scale),
+                g.drawText (timeLabel (at, interval), juce::Rectangle<float> (x + 3, half, 90 * scale, ruler.getBottom() - half),
                             juce::Justification::centredLeft, false);
             }
         }
@@ -464,13 +531,26 @@ public:
             {
                 auto pos = clip->getPosition();
                 auto r = juce::Rectangle<float>::leftTopRightBottom (xFor (pos.getStart().inSeconds()), (float) y + 3, xFor (pos.getEnd().inSeconds()), (float) (y + h - 4));
+                if (r.getRight() < 0 || r.getX() > getWidth()) continue;
                 g.setColour (muted ? t.clip.withAlpha (0.45f) : t.clip);
                 g.fillRoundedRectangle (r, 3.0f);
+                if (auto* wave = dynamic_cast<tracktion::WaveAudioClip*> (clip))
+                    if (auto* thumb = thumbnailFor (*wave))
+                    {
+                        g.setColour (t.clipText.withAlpha (muted ? 0.3f : 0.55f));
+                        const auto offset = pos.getOffset().inSeconds();
+                        thumb->drawChannels (g, r.withTrimmedTop (std::min (r.getHeight() * 0.5f, 15.0f * scale)).reduced (1.0f, 2.0f).toNearestInt(),
+                                             { tracktion::TimePosition::fromSeconds (offset), tracktion::TimePosition::fromSeconds (offset + pos.getLength().inSeconds()) }, 1.0f);
+                    }
                 g.setColour (t.outline);
                 g.drawRoundedRectangle (r, 3.0f, 1.0f);
+                // The name on its own strip at the top, so it reads over any waveform.
+                auto nameStrip = r.withHeight (std::min (r.getHeight(), 15.0f * scale)).reduced (1.0f, 1.0f);
+                g.setColour (t.clip);
+                g.fillRect (nameStrip);
                 g.setColour (t.clipText);
-                g.setFont (juce::FontOptions (13.0f * scale));
-                g.drawText (clip->getName(), r.reduced (5, 0), juce::Justification::centredLeft, true);
+                g.setFont (juce::FontOptions (12.0f * scale, juce::Font::bold));
+                g.drawText (clip->getName(), nameStrip.reduced (4, 0), juce::Justification::centredLeft, true);
             }
         }
         g.restoreState();
@@ -480,8 +560,17 @@ public:
         {
             const float x = xFor (m->getPosition().getStart().inSeconds());
             g.setColour (t.marker);
-            g.drawLine (x, 0.0f, x, (float) getHeight(), 2.0f);
-            g.drawText (m->getName(), juce::Rectangle<float> (x + 4, 2, 160 * scale, 16 * scale), juce::Justification::centredLeft, true);
+            g.drawLine (x, (float) rulerHeight, x, (float) getHeight(), 2.0f);
+            // The name sits just under the ruler on its own background, so it
+            // never runs into the bar numbers or a clip's name.
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (juce::FontOptions (13.0f * scale, juce::Font::bold), m->getName(), 0, 0);
+            const float w = std::min (200.0f * scale, ga.getBoundingBox (0, -1, true).getWidth() + 10.0f);
+            auto box = juce::Rectangle<float> (x, (float) rulerHeight + 1.0f, w, 17.0f * scale);
+            g.setColour (t.marker);
+            g.fillRect (box);
+            g.setColour (t.marker.contrasting (1.0f));
+            g.drawText (m->getName(), box.reduced (4, 0), juce::Justification::centredLeft, true);
         }
         // The playhead, with a triangle on the ruler so it's not a hairline alone.
         const float px = xFor (e.getTransport().getPosition().inSeconds());
@@ -506,6 +595,35 @@ public:
             if (row >= 0 && row < contentTracks (s->getEdit()).size()) onTrackClicked (row);
         }
         repaint();
+    }
+
+private:
+    // One waveform per audio file, made in the background and kept while it's on screen.
+    tracktion::SmartThumbnail* thumbnailFor (tracktion::WaveAudioClip& clip)
+    {
+        auto file = clip.getAudioFile();
+        if (! file.isValid()) return nullptr;
+        const auto key = file.getFile().getFullPathName();
+        auto& slot = thumbnails[key];
+        if (slot == nullptr) slot = std::make_unique<tracktion::SmartThumbnail> (clip.edit.engine, file, *this, &clip.edit);
+        return slot.get();
+    }
+    std::map<juce::String, std::unique_ptr<tracktion::SmartThumbnail>> thumbnails;
+    const void* thumbnailsEdit = nullptr;
+
+public:
+    // For the self-test: how much of each waveform is made (1 when all are).
+    double waveformsReady() const
+    {
+        double least = 1.0;
+        for (auto& [k, t] : thumbnails) least = std::min (least, t->getProportionComplete());
+        return thumbnails.empty() ? -1.0 : least;
+    }
+    void songChanged()
+    {
+        auto* s = core.session();
+        const void* now = s != nullptr ? &s->getEdit() : nullptr;
+        if (now != thumbnailsEdit) { thumbnails.clear(); thumbnailsEdit = now; viewStart = 0; lastWindow = 0; }
     }
 
 private:
@@ -683,8 +801,9 @@ public:
         return juce::String ("Ear First works by ear and by eye. Every action is a command: it has a key, it's in a menu, and Command-Shift-P finds it by name.\n\n")
              + "It's already listening. Every input on your interface is captured from the moment Ear First opens, so you never have to press record. "
                "When you've played something you want, press K (or R) to keep the last 30 seconds, or Shift-K for the last two minutes.\n\n"
-             + "To start: Command-N makes a new song, Command-O opens one. Space plays and stops. Page Up and Page Down move by bar, Left and Right by beat, "
-               "and M drops a marker. The keys follow REAPER with OSARA wherever Ear First does the same thing.\n\n"
+             + "To start: Command-N makes a new song, Command-O opens one. Space plays and stops. Page Up and Page Down move by bar. Left and Right move by a step, a beat to start with: "
+               "equals makes it finer, down to one sample, and minus makes it coarser, up to a minute. Command-J goes anywhere you can write: "
+               "a bar, a time, samples or timecode. M drops a marker. The keys follow REAPER with OSARA wherever Ear First does the same thing.\n\n"
              + "Lost? Command-Slash turns on key help: press any key to hear what it does. Command-Shift-R says the last message again.\n\n"
              + "This window comes back from the Help menu, under Welcome.";
     }
@@ -707,7 +826,7 @@ public:
     }
 
     juce::TextEditor text;
-    juce::TextButton start, closeButton;
+    PressButton start, closeButton;
 
 private:
     AppCore& core;

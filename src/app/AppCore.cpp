@@ -381,6 +381,8 @@ void AppCore::saveAppSettings()
     auto* o = new juce::DynamicObject();
     o->setProperty ("textScale", textScale);
     o->setProperty ("theme", theme);
+    o->setProperty ("stepUnit", stepUnit);
+    o->setProperty ("frameRate", frameRate);
     o->setProperty ("beatFlash", beatFlash);
     o->setProperty ("welcomeSeen", welcomeSeen);
     o->setProperty ("clipWarnings", clipWarnings);
@@ -439,6 +441,8 @@ void AppCore::loadAppSettings()
     if (! v.isObject()) return;
     textScale = juce::jlimit (0.75f, 3.0f, (float) (double) v.getProperty ("textScale", 1.0));
     theme = v.getProperty ("theme", "Follow the system").toString();
+    if (auto u = v.getProperty ("stepUnit", "Beat").toString(); stepUnitNames().contains (u)) stepUnit = u;
+    frameRate = juce::jlimit (1.0, 240.0, (double) v.getProperty ("frameRate", 30.0));
     beatFlash = (bool) v.getProperty ("beatFlash", false);
     welcomeSeen = (bool) v.getProperty ("welcomeSeen", false);
     clipWarnings = (bool) v.getProperty ("clipWarnings", true);
@@ -697,11 +701,20 @@ void AppCore::say (const juce::String& full, const juce::String& kind, const juc
 
 juce::String AppCore::placeText (const tracktion::Edit& edit, TimePosition t) const
 {
+    // As exact as the step you're moving by: off a beat it adds ticks, and the
+    // seconds get more places as the step gets finer, down to the sample.
     auto bb = edit.tempoSequence.toBarsAndBeats (t);
-    const auto bars = "bar " + juce::String (bb.bars + 1) + " beat " + juce::String (bb.getWholeBeats() + 1);
+    auto bars = "bar " + juce::String (bb.bars + 1) + " beat " + juce::String (bb.getWholeBeats() + 1);
+    const double frac = bb.beats.inBeats() - std::floor (bb.beats.inBeats() + 1.0e-9);
+    if (frac > 1.0e-6 && frac < 1.0 - 1.0e-6) bars << " tick " << juce::roundToInt (frac * 960.0);
+    const double step = song != nullptr && &song->getEdit() == &edit ? stepSeconds() : 1.0;
+    const int places = step < 0.009 ? 3 : step < 0.09 ? 2 : 1;
     const auto secs = t.inSeconds();
-    const auto time = secs >= 60.0 ? juce::String ((int) (secs / 60.0)) + " minutes " + juce::String (std::fmod (secs, 60.0), 1) + " seconds"
-                                   : juce::String (secs, 1) + " seconds";
+    const int mins = (int) (secs / 60.0);
+    auto time = mins > 0 ? juce::String (mins) + (mins == 1 ? " minute " : " minutes ") + juce::String (std::fmod (secs, 60.0), places) + " seconds"
+                         : juce::String (secs, places) + " seconds";
+    if (stepUnit == "Sample") time << ", sample " << juce::String ((juce::int64) std::llround (secs * currentSampleRate()));
+    else if (stepUnit == "Frame") time << ", frame " << juce::String ((juce::int64) std::floor (secs * frameRate + 1.0e-6));
     switch (speechPrefs.places)
     {
         case SpeechPrefs::Places::bars: return bars;
@@ -1052,7 +1065,8 @@ juce::String AppCore::transportLine() const
     const int secs = (int) pos.inSeconds();
     return juce::String (t.isPlaying() ? "Playing" : "Stopped") + "   Bar " + juce::String (bb.bars + 1) + ", beat "
            + juce::String (bb.getWholeBeats() + 1) + "   " + juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2)
-           + (t.looping.get() ? "   Loop on" : "") + (song->getEdit().clickTrackEnabled.get() ? "   Click on" : "");
+           + (t.looping.get() ? "   Loop on" : "") + (song->getEdit().clickTrackEnabled.get() ? "   Click on" : "")
+           + "   Step: " + stepUnit;
 }
 
 juce::String AppCore::captureLine() const
@@ -1620,6 +1634,7 @@ void AppCore::registerCommands()
 
     registerSongCommands();
     registerClipAndFileCommands();
+    registerMovementCommands();
 
     // Reports
     {
@@ -2224,7 +2239,7 @@ void AppCore::setDefaultKeys()
         k ("Primary+Shift+Backspace", "routing.remove"),
         k ("Primary+Shift+H", "tracks.output"),
         k ("Primary+Shift+B", "view.beat-flash"),
-        k ("Primary+Shift+G", "view.messages"),
+        k ("F8", "view.messages"),
         k ("Primary+I", "file.import-audio"),
         k ("Primary+Shift+E", "file.render"),
         k ("V", "levels.report", "main"),
@@ -2241,8 +2256,19 @@ void AppCore::setDefaultKeys()
         k ("PageUp", "transport.previous-bar", "main"),
         k ("Primary+PageDown", "transport.next-beat", "main"),
         k ("Primary+PageUp", "transport.previous-beat", "main"),
-        k ("Right", "transport.next-beat", "main"),
-        k ("Left", "transport.previous-beat", "main"),
+        k ("Right", "transport.step-forward", "main"),
+        k ("Left", "transport.step-back", "main"),
+        k ("=", "transport.finer-step", "main"),
+        k ("-", "transport.coarser-step", "main"),
+        k ("Primary+Shift+S", "transport.step-size"),
+        // REAPER's Tab goes to transients; here Tab stays for moving between
+        // controls, so edges are E and Shift-E.
+        k ("E", "transport.next-edge", "main"),
+        k ("Shift+E", "transport.previous-edge", "main"),
+        k ("Shift+'", "transport.next-change", "main"),
+        k ("Shift+;", "transport.previous-change", "main"),
+        k ("Primary+Shift+J", "report.position-detail"),
+        k ("Primary+Shift+G", "transport.move"),
         k ("Alt+Shift+Right", "transport.next-beat", "main"),
         k ("Alt+Shift+Left", "transport.previous-beat", "main"),
         k ("Alt+Home", "transport.bar-start", "main"),
@@ -2253,7 +2279,7 @@ void AppCore::setDefaultKeys()
         k ("Period", "transport.fast-forward", "main"),
         k ("Comma", "transport.rewind", "main"),
         k ("Primary+G", "transport.go-to-bar"),
-        k ("Primary+J", "transport.go-to-bar"),
+        k ("Primary+J", "transport.go-to"),
         k ("Primary+R", "transport.loop"),
         k ("[", "transport.loop-start", "main"),
         k ("]", "transport.loop-end", "main"),
@@ -2264,6 +2290,13 @@ void AppCore::setDefaultKeys()
         k (";", "markers.previous", "main"),
         k ("'", "markers.next", "main"),
         k ("Primary+Shift+M", "markers.list"),
+        k ("Shift+Backspace", "markers.delete", "main"),
+        k ("Shift+Delete", "markers.delete", "main"),
+        k ("Primary+Shift+N", "file.new-song-named"),
+        k ("Shift+V", "tracks.volume", "main"),
+        k ("Shift+P", "tracks.pan", "main"),
+        k ("F7", "tracks.input", "main"),
+        k ("F1", "help.welcome"),
         k ("1", "markers.go-to", "main", markerNumber (1)),
         k ("Primary+1", "markers.set", "main", markerNumber (1)),
         k ("2", "markers.go-to", "main", markerNumber (2)),
