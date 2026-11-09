@@ -18,11 +18,15 @@ The idea: every input you have is recorded all the time, whether the song is pla
 - **MIDI controls.** Any pedal, footswitch, pad, key or button on a MIDI device can run any command: choose the command, press the control.
 - **The click.** Its own track, never in a mix, locked to the song's tempo and meter to the sample: different sounds for the one, the beats and subdivisions, built in or your own (Import click sounds takes any audio file, trims it to land on the beat and matches its level); any beat loud, normal, soft or silent; eighths, triplets and sixteenths with swing; odd meters; a count-in of one or two bars, and click only during the count-in if you want. One key says how it's set. Tempo and time signature are commands like everything else.
 - **MIDI too.** Every MIDI input is kept all the time on the same clock as the audio, so a keep gets both, lined up, with the sustain pedal where it was. MIDI is kept even with no audio inputs open.
+- **Moving around and editing.** By bar, beat or a few seconds, to any bar, and between markers you name. Tracks can be renamed, reordered, muted, soloed, panned and set to any level. Clips can be split, trimmed, moved and deleted, and everything undoes.
+- **Audio in and out.** Import audio files into a song, and render the whole song to WAV or FLAC in the background.
+- **Levels.** Meters for every input and output, a report of every level out loud, and a spoken warning when anything clips.
+- **The screen.** Buttons for the common commands, a timeline with bars, markers, clips and the playhead, meters, a beat light, and everything that's been said. Light, dark and high contrast colours, or whatever the system uses, and the edge of the window can flash on the beat. A welcome the first time.
 - **Updates.** On the Mac, Sparkle looks quietly every few hours and, when a new version is out, the app says so once, in one sentence. Check for Updates opens Sparkle's own window. An update never restarts the app while you're recording or have unsaved work.
 
 ## Not done yet
 
-Windows builds in CI but hasn't been tried with NVDA or JAWS, and Windows updates (WinSparkle) come with the first Windows installer. Grooves as the click, a spoken count, editing takes, mixing and plugins are still to come.
+Windows builds in CI but hasn't been tried with NVDA or JAWS, and Windows updates (WinSparkle) come with the first Windows installer. Grooves as the click, a spoken count, meters per track, mixing and plugins are still to come.
 
 ## Building
 

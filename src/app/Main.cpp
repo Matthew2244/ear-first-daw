@@ -11,6 +11,7 @@
 #include "app/AppCore.h"
 #include "click/ClickSamples.h"
 #include "session/Tracks.h"
+#include "app/Views.h"
 #include <iostream>
 
 using namespace earfirst;
@@ -482,11 +483,29 @@ private:
 };
 
 //==============================================================================
-class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel, private juce::Timer
+class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel, private juce::Timer,
+                      private juce::DarkModeSettingListener
 {
 public:
-    MainComponent (AppCore& c, ScreenReaderOutput& out) : core (c), router (c), output (out)
+    MainComponent (AppCore& c, ScreenReaderOutput& out)
+        : core (c), router (c), output (out), transportBar (c), timeline (c), meterStrip (c), history (out.log)
     {
+        setLookAndFeel (&look);
+        applyTheme();
+        juce::Desktop::getInstance().addDarkModeSettingListener (this);
+        addAndMakeVisible (transportBar);
+        addAndMakeVisible (timeline);
+        addAndMakeVisible (meterStrip);
+        addAndMakeVisible (history);
+        tracksHeader.setText ("Tracks", juce::dontSendNotification);
+        tracksHeader.setWantsKeyboardFocus (false);
+        tracksHeader.setAccessible (false);   // the list says its own name
+        addAndMakeVisible (tracksHeader);
+        timeline.laneTop = [this] { return tracks.getY() - timeline.getY() - (tracks.getViewport() != nullptr ? tracks.getViewport()->getViewPositionY() : 0); };
+        timeline.laneHeight = [this] { return tracks.getRowHeight(); };
+        timeline.onTrackClicked = [this] (int row) { tracks.selectRow (row); };
+        core.onViewChanged = [this] { applyTheme(); resized(); repaint(); };
+        core.onShowMessages = [this] { history.grabKeyboardFocus(); if (history.getNumRows() > 0) history.selectRow (history.getNumRows() - 1); };
         setTitle ("Ear First");
         status.setTitle ("Last message");
         status.setText ("Ready.", juce::dontSendNotification);
@@ -506,7 +525,7 @@ public:
         songLine.setTitle ("Song");
         transportInfo.setTitle ("Transport");
         captureInfo.setTitle ("Capture");
-        startTimerHz (10);
+        startTimerHz (30);
 
         tracks.setTitle ("Tracks");
         tracks.setDescription ("Up and down move between tracks.");
@@ -526,6 +545,21 @@ public:
     ~MainComponent() override
     {
         core.onSongChanged = nullptr;
+        core.onViewChanged = nullptr;
+        core.onShowMessages = nullptr;
+        juce::Desktop::getInstance().removeDarkModeSettingListener (this);
+        setLookAndFeel (nullptr);
+    }
+
+    void darkModeSettingChanged() override   { applyTheme(); repaint(); }
+
+    void applyTheme()
+    {
+        lastContrast = systemWantsHighContrast();
+        look.apply (Theme::make (core.theme));
+        juce::LookAndFeel::setDefaultLookAndFeel (&look);   // dialogs, menus and forms too
+        if (auto* w = findParentComponentOfClass<juce::DocumentWindow>()) w->setBackgroundColour (look.theme.background);
+        sendLookAndFeelChange();
     }
 
     void resized() override
@@ -537,14 +571,29 @@ public:
         status.setFont (juce::FontOptions (16.0f * s));
         tracks.setRowHeight (juce::roundToInt (30 * s));
 
+        transportBar.scale = timeline.scale = meterStrip.scale = history.scale = s;
+        tracksHeader.setFont (juce::FontOptions (14.0f * s, juce::Font::bold));
+        history.setRowHeight (juce::roundToInt (22 * s));
+
         auto r = getLocalBounds().reduced (12);
         songLine.setBounds (r.removeFromTop (juce::roundToInt (36 * s)));
+        transportBar.setBounds (r.removeFromTop (transportBar.heightFor (r.getWidth(), s)));
+        r.removeFromTop (4);
         transportInfo.setBounds (r.removeFromTop (juce::roundToInt (28 * s)));
         captureInfo.setBounds (r.removeFromTop (juce::roundToInt (24 * s)));
         r.removeFromTop (8);
         status.setBounds (r.removeFromBottom (juce::roundToInt (32 * s)));
+        history.setBounds (r.removeFromBottom (juce::roundToInt (22 * s) * 4 + 2));
+        r.removeFromBottom (6);
+        meterStrip.setBounds (r.removeFromBottom (juce::roundToInt (54 * s)));
         r.removeFromBottom (8);
-        tracks.setBounds (r);
+        // The track list and the timeline side by side, rows lined up.
+        auto left = r.removeFromLeft (juce::jlimit (juce::roundToInt (180 * s), juce::roundToInt (360 * s), r.getWidth() / 3));
+        r.removeFromLeft (6);
+        timeline.rulerHeight = juce::roundToInt (34 * s);
+        tracksHeader.setBounds (left.removeFromTop (timeline.rulerHeight));
+        tracks.setBounds (left);
+        timeline.setBounds (r);
     }
 
     void timerCallback() override
@@ -553,12 +602,41 @@ public:
                                          : juce::String ("No song open"), juce::dontSendNotification);
         transportInfo.setText (core.transportLine(), juce::dontSendNotification);
         captureInfo.setText (core.captureLine(), juce::dontSendNotification);
+        transportBar.refresh();
+        if (transportBar.beatLight.update() && core.beatFlash) { flashOne = transportBar.beatLight.isOne(); flashUntil = juce::Time::getMillisecondCounterHiRes() + 140.0; repaint(); }
+        else if (flashUntil > 0 && juce::Time::getMillisecondCounterHiRes() > flashUntil) { flashUntil = 0; repaint(); }
+        timeline.repaint();
+        meterStrip.repaint();
+        history.update();
+        // The system's high contrast setting has no notification, so look every few seconds.
+        if (++ticks % 30 == 0 && core.theme == "Follow the system" && systemWantsHighContrast() != lastContrast) { applyTheme(); repaint(); }
     }
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+        g.fillAll (look.theme.background);
+        g.setColour (look.theme.outline);
+        g.drawRect (history.getBounds().expanded (1));
+        g.drawRect (tracks.getBounds().expanded (1));
     }
+
+    void paintOverChildren (juce::Graphics& g) override
+    {
+        if (flashUntil <= 0) return;
+        g.setColour (flashOne ? look.theme.accent : look.theme.accent.withAlpha (0.6f));
+        g.drawRect (getLocalBounds(), flashOne ? 12 : 8);
+    }
+
+    EarFirstLook look;
+    juce::TooltipWindow tooltips { this, 600 };
+    TransportBar transportBar;
+    Timeline timeline;
+    MeterStrip meterStrip;
+    MessageHistory history;
+    juce::Label tracksHeader;
+    double flashUntil = 0;
+    bool flashOne = false, lastContrast = false;
+    int ticks = 0;
 
     void refresh()
     {
@@ -591,7 +669,7 @@ public:
     // every menu item says its key. Toggles are ticked.
     juce::StringArray getMenuBarNames() override
     {
-        return { "File", "Edit", "Transport", "Click", "Song", "Capture", "Tracks", "Audio", "View", "Reports", "Speech", "Help" };
+        return { "File", "Edit", "Transport", "Click", "Song", "Markers", "Capture", "Tracks", "Clips", "Audio", "View", "Reports", "Speech", "Help" };
     }
 
     juce::PopupMenu getMenuForIndex (int, const juce::String& menuName) override
@@ -683,12 +761,17 @@ public:
         if (row < 0 || row >= list.size()) return {};
         auto* t = list[row];
         auto n = t->getClips().size();
-        return t->getName() + ", " + (n == 0 ? juce::String ("empty") : juce::String (n) + (n == 1 ? " clip" : " clips"));
+        return t->getName() + ", " + (n == 0 ? juce::String ("empty") : juce::String (n) + (n == 1 ? " clip" : " clips"))
+               + (t->isMuted (false) ? ", muted" : "") + (t->isSolo (false) ? ", soloed" : "");
     }
     void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
     {
-        if (selected) g.fillAll (findColour (juce::ListBox::backgroundColourId).contrasting (0.2f));
-        g.setColour (findColour (juce::ListBox::textColourId));
+        if (selected)
+        {
+            g.fillAll (look.theme.selection);
+            if (tracks.hasKeyboardFocus (true)) { g.setColour (look.theme.focus.contrasting (0.0f)); g.drawRect (0, 0, w, h, 2); }
+        }
+        g.setColour (selected ? look.theme.selectionText : look.theme.text);
         g.setFont (juce::FontOptions (17.0f * core.textScale));
         g.drawText (trackText (row), 8, 0, w - 16, h, juce::Justification::centredLeft, true);
     }
@@ -778,6 +861,8 @@ public:
         window = std::make_unique<MainWindow> (*core, output);
         core->onOpenSongRequested = [this] { chooseSong(); };
         core->onImportClickSoundsRequested = [this] { chooseClickSounds(); };
+        core->onImportAudioRequested = [this] { chooseAudioToImport(); };
+        core->onShowWelcome = [this] { showWelcome(); };
         core->onUnsavedClose = [this] (std::function<void()> closeIt) { askToSave (core->session()->getName(), "close it", std::move (closeIt)); };
         window->setVisible (true);
         window->content->tracks.grabKeyboardFocus();
@@ -786,15 +871,33 @@ public:
         // Said once the window has focus and VoiceOver has finished
         // describing it, or it gets dropped. Each part is its own kind, so a
         // short welcome never cuts off a problem.
-        juce::Timer::callAfterDelay (1500, [this]
+        // The interface opens after the window, so the app answers at once even
+        // while a big interface takes its time.
+        core->startAudio ([this]
         {
             if (core == nullptr) return;
+            if (window != nullptr) window->content->refresh();
+            // A new interface gets checked once for the computer's own sound, after the welcome.
+            juce::Timer::callAfterDelay (3500, [this] { if (core != nullptr) core->findComputerInputs (true); });
+            if (! welcomed) return;   // the welcome hasn't been said yet; it says any problem itself
+            if (auto p = core->startupProblemSentence(); p.isNotEmpty()) core->say (p, "Errors");
+        });
+        if (! core->welcomeSeen)
+        {
+            // The first time: the welcome window says it all, so nothing is spoken over it.
+            welcomed = true;
+            core->welcomeSeen = true;
+            core->saveAppSettings();
+            juce::Timer::callAfterDelay (800, [this] { if (core != nullptr) showWelcome(); });
+        }
+        else juce::Timer::callAfterDelay (1500, [this]
+        {
+            if (core == nullptr) return;
+            welcomed = true;
             core->say ("Press Command-N for a new song, Command-O to open one, or Command-Shift-P to find any command.", "Startup", "Ready.");
             if (auto p = core->startupProblemSentence(); p.isNotEmpty()) core->say (p, "Errors");
             if (auto l = core->leftoverSentence(); l.isNotEmpty()) core->say (l, "Capture");
         });
-        // A new interface gets checked once for the computer's own sound, after the welcome.
-        juce::Timer::callAfterDelay (5000, [this] { if (core != nullptr) core->findComputerInputs (true); });
         runCommandsFrom (args, 3000);
     }
 
@@ -817,6 +920,23 @@ public:
                 if (core->commands().find (id) == nullptr) core->say ("There's no command called " + id + ".", "Errors");
                 else core->runFromUser (id, CommandList::Source::menu);
         });
+    }
+
+    bool welcomed = false;
+    juce::Component::SafePointer<juce::DialogWindow> welcomeWindow;
+
+    void showWelcome()
+    {
+        if (welcomeWindow != nullptr) { welcomeWindow->toFront (true); return; }
+        auto* w = new WelcomeComponent (*core, [this] { if (welcomeWindow) welcomeWindow->exitModalState (0); });
+        juce::DialogWindow::LaunchOptions o;
+        o.content.setOwned (w);
+        o.dialogTitle = "Welcome to Ear First";
+        o.escapeKeyTriggersCloseButton = true;
+        o.useNativeTitleBar = true;
+        o.resizable = true;
+        welcomeWindow = o.launchAsync();
+        w->text.grabKeyboardFocus();
     }
 
     void anotherInstanceStarted (const juce::String& args) override   { runCommandsFrom (args, 0); }
@@ -892,6 +1012,17 @@ private:
     ScreenReaderOutput output;
     std::unique_ptr<AppCore> core;
     std::unique_ptr<MainWindow> window;
+    void chooseAudioToImport()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Choose audio to import", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::canSelectMultipleItems,
+                              [this] (const juce::FileChooser& fc)
+                              {
+                                  if (core == nullptr || fc.getResults().isEmpty()) return;
+                                  core->say (core->importAudio (fc.getResults()), "Import");
+                              });
+    }
+
     std::unique_ptr<juce::FileChooser> chooser;
 };
 

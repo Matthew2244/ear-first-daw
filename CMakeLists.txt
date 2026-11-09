@@ -128,7 +128,7 @@ juce_add_binary_data(earfirst_click_sounds HEADER_NAME ClickSoundsData.h NAMESPA
 
 # The app, and its self-test (the same window code, never shown).
 set(EARFIRST_APP_SOURCES
-    src/app/Main.cpp src/app/AppCore.cpp src/app/Updater.cpp
+    src/app/Main.cpp src/app/AppCore.cpp src/app/SongCommands.cpp src/app/Updater.cpp
     src/commands/Commands.cpp src/commands/Keymap.cpp src/commands/MidiControls.cpp src/speech/Speech.cpp src/speech/SpeechPrefs.cpp
     src/session/Session.cpp src/capture/EngineCapture.cpp src/capture/ReturnFinder.cpp src/capture/MidiCapture.cpp src/capture/CaptureRecorder.cpp src/click/ClickPlugin.cpp src/click/ClickSounds.cpp src/click/ClickSamples.cpp)
 if (APPLE)

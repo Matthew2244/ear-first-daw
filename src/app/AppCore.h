@@ -54,6 +54,10 @@ public:
     juce::String startupSentence() const;
     juce::String leftoverSentence() const;
     juce::String startupProblemSentence() const   { return startupProblem; }
+    // Opens the audio interface after the window is up; the check for a stuck
+    // interface runs on a thread. `whenOpen` runs on the message thread after.
+    void startAudio (std::function<void()> whenOpen = {});
+    bool audioIsOpen() const                      { return capture != nullptr; }
 
     // Songs.
     juce::String newSong (const juce::String& name);
@@ -64,6 +68,12 @@ public:
     std::function<void()> onImportClickSoundsRequested;   // the window shows a file chooser, then calls importClickSounds
     // Copies audio files in as click sounds and says what happened.
     void importClickSounds (const juce::Array<juce::File>&);
+    std::function<void()> onImportAudioRequested;   // the window shows a file chooser, then calls importAudio
+    juce::String importAudio (const juce::Array<juce::File>&);   // says what happened
+    juce::File lastRender;                      // for tests and Show renders
+    bool isRendering() const                    { return renderJob != nullptr; }
+    // Levels, 20 times a second: now (decaying) and held for a few seconds, per channel.
+    struct Meters { std::vector<float> input, output, inputHeld, outputHeld; std::vector<double> inputHeldAt, outputHeldAt; bool inputClipped = false, outputClipped = false; } meters;
     std::function<void()> onShowPalette;        // the window shows Find a command
     bool keyHelpOn = false;                     // key help: keys say what they do instead of doing it
     std::function<void (std::function<void()>)> onUnsavedClose;   // ask save / don't save / cancel, then run it
@@ -90,6 +100,12 @@ public:
     juce::String captureLine() const;
     // Text size for everyone who reads the screen, kept between launches.
     float textScale = 1.0f;
+    // How the window looks: a Theme name ("Follow the system", "Light", "Dark", "High contrast").
+    juce::String theme = "Follow the system";
+    bool beatFlash = false;                     // the whole window's edge lights on each beat
+    bool welcomeSeen = false;                   // the welcome window has been shown once
+    std::function<void()> onViewChanged;        // theme, flash or text size changed: the window redraws
+    std::function<void()> onShowWelcome, onShowMessages;
     juce::StringArray inputDeviceNames() const;
     juce::StringArray outputDeviceNames() const;
     juce::String setAudio (const juce::String& input, const juce::String& output, double rate, int buffer);
@@ -104,11 +120,19 @@ public:
     void saveAppSettings();
     void loadAppSettings();
 
-    static constexpr int keymapDefaultsVersion = 1;
+    static constexpr int keymapDefaultsVersion = 2;
 
 private:
     void timerCallback() override;
     void registerCommands();
+    void registerSongCommands();           // moving around, markers, track basics (SongCommands.cpp)
+    void registerClipAndFileCommands();    // import, render, levels, clips (SongCommands.cpp)
+    tracktion::AudioTrack* selectedAudioTrack() const;
+    std::shared_ptr<tracktion::EditRenderer::Handle> renderJob;
+    bool clipWarnings = true;
+    std::map<juce::String, double> lastClipWarning;
+    void updateMeters (double now);
+    juce::String trackSentence (tracktion::AudioTrack&) const;
     void setDefaultKeys();
     juce::String positionSentence() const;
     bool isRecordingOrCapturing() const;
@@ -155,7 +179,11 @@ private:
     static juce::StringArray channelsIn (const juce::String& choice, const juce::StringArray& names);
     juce::String preferredInput, preferredOutput;   // the interface you chose; tried first at every launch
     juce::String startupProblem;   // said at startup: an interface that wouldn't answer
-    juce::String savedInterfaceThatWontAnswer();   // said after a device switch kept the old capture
+    struct InterfaceCheck { std::unique_ptr<juce::XmlElement> setup; juce::String stuck; };
+    static InterfaceCheck checkSavedInterface (std::unique_ptr<juce::XmlElement> saved, juce::String prefIn, juce::String prefOut);
+    void openAudioNow();
+    bool audioStarting = false;
+    juce::File captureFolderRoot;
     bool wasPlaying = false;
 };
 

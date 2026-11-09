@@ -297,6 +297,15 @@ void EngineCapture::audioDeviceIOCallbackWithContext (const float* const* in, in
     // Live inputs go out last, and stay out of that note: otherwise any input
     // you route would match what went out and be taken for a computer return.
     routes.mix (out, numOut, n);
+
+    levelOutputs.store (std::min (numOut, (int) outputLevel.size()), std::memory_order_relaxed);
+    for (int c = 0; c < numOut && c < (int) outputLevel.size(); ++c)
+        if (out[c] != nullptr)
+        {
+            auto r = juce::FloatVectorOperations::findMinAndMax (out[c], n);
+            const float peak = std::max (std::abs (r.getStart()), std::abs (r.getEnd()));
+            if (peak > outputLevel[(size_t) c].load (std::memory_order_relaxed)) outputLevel[(size_t) c].store (peak, std::memory_order_relaxed);
+        }
     // The clock runs whenever the device does, inputs or not, so MIDI is
     // captured and placed even with no audio inputs open.
     if (sampleRate > 0)
@@ -335,10 +344,27 @@ void EngineCapture::renderEarcon (float* const* out, int numOut, int n) noexcept
     }
 }
 
+void EngineCapture::takeLevels (std::vector<float>& inputs, std::vector<float>& outputs)
+{
+    inputs.resize ((size_t) levelInputs.load (std::memory_order_relaxed));
+    outputs.resize ((size_t) levelOutputs.load (std::memory_order_relaxed));
+    for (size_t c = 0; c < inputs.size(); ++c)  inputs[c] = inputLevel[c].exchange (0.0f, std::memory_order_relaxed);
+    for (size_t c = 0; c < outputs.size(); ++c) outputs[c] = outputLevel[c].exchange (0.0f, std::memory_order_relaxed);
+}
+
 bool EngineCapture::capture (const float* const* in, int numIn, int n) noexcept
 {
     auto* rec = recorder.get();
     if (rec == nullptr || numIn != numInputs) return false;
+
+    levelInputs.store (std::min (numIn, (int) inputLevel.size()), std::memory_order_relaxed);
+    for (int c = 0; c < numIn && c < (int) inputLevel.size(); ++c)
+        if (in[c] != nullptr)
+        {
+            auto r = juce::FloatVectorOperations::findMinAndMax (in[c], n);
+            const float peak = std::max (std::abs (r.getStart()), std::abs (r.getEnd()));
+            if (peak > inputLevel[(size_t) c].load (std::memory_order_relaxed)) inputLevel[(size_t) c].store (peak, std::memory_order_relaxed);
+        }
 
     for (int c = 0; c < numIn && c < (int) inputWasQuiet.size(); ++c)
         if (in[c] != nullptr && ! (c < (int) computerInput.size() && computerInput[(size_t) c].load (std::memory_order_relaxed)))

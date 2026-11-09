@@ -123,6 +123,9 @@ public:
     std::function<void (const juce::File&, double)> onCaptureSetAside;
     TimelineMap& getTimelineMap()           { return map; }
 
+    // The loudest sample on each channel since the last call. Message thread.
+    void takeLevels (std::vector<float>& inputs, std::vector<float>& outputs);
+
 private:
     void audioDeviceIOCallbackWithContext (const float* const*, int, float* const*, int, int,
                                            const juce::AudioIODeviceCallbackContext&) override;
@@ -225,6 +228,8 @@ private:
     std::atomic<int> runNumber { 0 }, sweepRun { -1 };   // which capture run is going, and which one the sweep played in
     std::atomic<int> roundTripSamples { 8192 };     // output to input through the interface, with room to spare
 
+    std::array<std::atomic<float>, 1024> inputLevel {}, outputLevel {};   // loudest since last read; audio thread raises them
+    std::atomic<int> levelInputs { 0 }, levelOutputs { 0 };
     int maxBlock = 4096;
     int deviceBlock = 512;
     std::vector<const float*> chunk;   // sized before audio starts

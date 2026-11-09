@@ -25,22 +25,29 @@ Ear First is an ear-first, accessibility-first DAW on JUCE and Tracktion Engine,
 - **Songs** (`src/session`). A song is a folder, with safe saves, autosave and recovery. A hidden idle Edit keeps MIDI alive with no song open.
 - **Click** (`src/click`). On its own track, locked to tempo and meter; accents, subdivisions, swing, count-in. Sounds are the four recorded takes Matthew picked (`src/click/sounds`, embedded as binary data), plus the Beep, which is made in code. `ClickSamples` imports any audio file: trims the lead-in, resamples, matches level, and caches for the whole run so the audio thread never frees one. Defaults: Cowbell 1 on the one, Clave on beats, Hi-hat on subdivisions.
 - **Routing.** Any input to any output (`src/capture/RouteMatrix.h`), mixed at the audio callback, with or without a song. Inputs are copied before the engine runs and mixed in last, after the "what went out" note, so a routed input is never taken for a computer return. An input marked as the computer's own sound is refused and never goes out, since that's a feedback loop. Commands: Send input to output (one channel or a neighbouring pair, with a level), Remove a route, Remove every route, What's routed. Saved per interface by channel name in App.json. Play track through picks a track's outputs through the engine, and is saved in the song.
-  Checked on a 64-input interface with VoiceOver: all 64 outputs open, Play track through reads its choices and result, the forms speak each field and the result, the feedback refusal is spoken, and a routed input came back through the interface's computer return at a steady round trip, stronger with level and gone once removed. Not yet heard by a person, and Play track through hasn't been used with VoiceOver.
+  Checked on a 64-input interface with VoiceOver: all 64 outputs open, Play track through reads its choices and result, the forms speak each field and the result, the feedback refusal is spoken, and a routed input came back through the interface's computer return at a steady round trip, stronger with level and gone once removed. Not yet heard by a person.
+- **Moving around, markers, tracks, clips** (`src/app/SongCommands.cpp`). Left and Right by bar, Shift by beat, Comma and Period five seconds, End, Go to bar. Markers: add (Shift-M), next and previous (] and [), rename, delete, list. Tracks: rename, delete, move up and down, mute (M), solo (S), volume and pan (forms, Shift-Up/Down, Command-Left/Right), About this track (I), Track input (what you hear through a track; capture still records everything). Clips on the selected track at the playhead: About this clip, next and previous (N, P), split (B), trim start and end to here, move by beats or to a bar, delete. All undoable.
+- **Import and render.** Import audio copies files into the song's Audio folder and places them at the playhead, one track each from the selected one. Render song writes the whole song (click left out) to the song's Renders folder as WAV 16, 24 or 32-bit float, or FLAC, on the engine's background renderer; it says when it's done.
+- **Levels.** EngineCapture keeps the loudest sample per input and output channel; AppCore reads them 20 times a second into `meters` (now and held three seconds). What's the level (V) says every channel with sound on it. Clipping (at -0.1 dBFS) is said once per channel every five seconds, never for computer returns; Clipping warnings turns that off.
+- **Startup.** The window opens first. The check for a stuck interface runs on a thread (`checkSavedInterface`), then `openAudioNow` opens the device on the message thread, about 0.6 s on a 64-channel StudioLive.
+- **The screen** (`src/app/Views.h`). A transport bar of buttons that run the same commands (unavailable ones stay reachable and say why), a beat light, a timeline lined up with the track list (bars, markers, clips with names, loop, playhead; click to move), meters for every input and output with clip lights, and the message history (Go to messages). Colours: Follow the system, Light, Dark, High contrast; the self-test holds every text colour to 4.5 to 1 and can write offscreen pictures of the window with `EARFIRST_SNAPSHOTS=<folder>`, so nobody needs screenshots. Flash on the beat lights the window's edge. A welcome window the first time, and from Help.
 - **Command line.** `--run <command-id>` runs a command once the app is up. It's the way to do live checks without driving the window.
 - **Mac app.** Signed with `EARFIRST_SIGN_IDENTITY` through `cmake/sign_mac.sh`, Sparkle embedded.
 
 ## Next
 
-1. **Routing, the rest.** Keys for the routing commands, a spoken or on-screen matrix, sends, and a cue mix per player.
-2. **Click sounds still open.** Matthew hasn't yet judged round two: five ticks and two woodblocks in iCloud, `Ear First DAW/Click candidates 2`. There's no good rim: 0 clean of 14 from ElevenLabs. A real recording or an import is the way.
-3. From the README: grooves as the click, a spoken count, editing takes, mixing, plugins. The living list of ideas is iCloud `Ear First DAW/Feature list.md`.
+1. **Routing, the rest.** A spoken or on-screen matrix, sends, and a cue mix per player. The routing commands have keys now (Command-Shift-O sends, Shift-O says what's routed).
+2. **Meters per track**, and editing several tracks' clips at once (a keep makes one per input, and the clip commands work on the selected track only).
+3. **Click sounds still open.** Matthew hasn't yet judged round two: five ticks and two woodblocks in iCloud, `Ear First DAW/Click candidates 2`. There's no good rim: 0 clean of 14 from ElevenLabs. A real recording or an import is the way.
+4. From the README: grooves as the click, a spoken count, editing takes, mixing, plugins. The living list of ideas is iCloud `Ear First DAW/Feature list.md`.
 
 ## Not verified
 
 - Import click sounds and Find the computer's own sound have not been used by a person with VoiceOver. The file chooser has not been exercised at all.
 - `--run` handed to a copy that's already running: the second copy exits cleanly, but nothing has confirmed the running copy ran the command. Run the app's binary directly; `open -a` won't pass arguments to a running copy.
 - Detecting a return by itself has only run in the engine test, not live with a song playing.
-- Windows builds and passes CI, but nobody has tried it with NVDA or JAWS.
+- Windows builds and passes CI, but nobody has tried it with NVDA or JAWS. The high contrast check on Windows has only been compiled.
+- Track input, the meters and the clipping warning haven't been heard or seen by a person.
 
 ## Known weak spots
 

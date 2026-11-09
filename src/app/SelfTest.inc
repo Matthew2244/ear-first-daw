@@ -301,6 +301,235 @@ int runSelfTest()
              "Record from either says why it can't, or opens its form: \"" + last() + "\"");
 
     stSay ("");
+    stSay ("Moving around a song");
+    {
+        auto run = [&] (const char* id, CommandArgs a = {}) { return core->commands().run (id, a); };
+        auto& transport = core->session()->getEdit().getTransport();
+        auto& tempo = core->session()->getEdit().tempoSequence;
+        auto barNow = [&] { return tempo.toBarsAndBeats (transport.getPosition()).bars + 1; };
+        transport.setPosition (tracktion::TimePosition());
+        press (stKey (juce::KeyPress::rightKey));
+        stCheck (barNow() == 2 && last().isNotEmpty(), "Right goes to bar 2 and says so: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::rightKey, shift));
+        stCheck (tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 1, "Shift-Right steps one beat.");
+        press (stKey (juce::KeyPress::leftKey));
+        stCheck (barNow() == 2 && tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 0, "Left from inside a bar goes to that bar's start.");
+        press (stKey (juce::KeyPress::leftKey));
+        press (stKey (juce::KeyPress::leftKey));
+        stCheck (barNow() == 1 && transport.getPosition().inSeconds() == 0.0, "Left stops at the start of the song.");
+        CommandArgs where; where.set ("bar", 9); where.set ("beat", 3.0);
+        run ("transport.go-to-bar", where);
+        stCheck (barNow() == 9 && tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 2, "Go to bar lands on bar 9, beat 3: \"" + last() + "\"");
+        run ("transport.rewind");
+        stCheck (transport.getPosition().inSeconds() < tempo.toTime (tracktion::tempo::BarsAndBeats { 8, tracktion::BeatDuration::fromBeats (2.0) }).inSeconds(), "Rewind moves back.");
+
+        stSay ("Markers");
+        run ("markers.next");
+        stCheck (last().contains ("no markers") || last().contains ("Shift-M"), "with no markers, Next marker says so: \"" + last() + "\"");
+        CommandArgs verse; verse.set ("name", "Verse");
+        where.set ("bar", 5); where.set ("beat", 1.0); run ("transport.go-to-bar", where); run ("markers.add", verse);
+        where.set ("bar", 2); run ("transport.go-to-bar", where); run ("markers.add");
+        transport.setPosition (tracktion::TimePosition());
+        run ("markers.next");
+        stCheck (barNow() == 2 && last().startsWith ("Marker"), "Next marker finds the nearest one first: \"" + last() + "\"");
+        run ("markers.next");
+        stCheck (barNow() == 5 && last().startsWith ("Verse"), "then the one after: \"" + last() + "\"");
+        run ("markers.next");
+        stCheck (barNow() == 5 && last().contains ("No more"), "and says when there are no more.");
+        run ("markers.list");
+        stCheck (last().startsWith ("2 markers") && last().indexOf ("Marker") < last().indexOf ("Verse"), "List markers goes in song order: \"" + last() + "\"");
+        run ("markers.delete");
+        stCheck (last() == "Deleted Verse." && core->session()->getEdit().getMarkerManager().getMarkers().size() == 1, "Delete marker removes the one here.");
+        run ("edit.undo");
+        stCheck (core->session()->getEdit().getMarkerManager().getMarkers().size() == 2, "and Undo brings it back.");
+    }
+
+    stSay ("");
+    stSay ("Track basics");
+    {
+        auto run = [&] (const char* id, CommandArgs a = {}) { return core->commands().run (id, a); };
+        auto list = [&] { return contentTracks (core->session()->getEdit()); };
+        while (list().size() < 3) run ("tracks.add");
+        core->selectedTrack = 0;
+        CommandArgs named; named.set ("name", "Piano");
+        run ("tracks.rename", named);
+        stCheck (list()[0]->getName() == "Piano", "Rename track renames it: \"" + last() + "\"");
+        run ("tracks.move-down");
+        stCheck (list()[1]->getName() == "Piano" && core->selectedTrack == 1, "Move track down: \"" + last() + "\"");
+        run ("tracks.move-up");
+        stCheck (list()[0]->getName() == "Piano" && core->selectedTrack == 0, "Move track up, back to the top.");
+        run ("tracks.move-up");
+        stCheck (last().contains ("already"), "and it says when it can't go further.");
+        press (stKey ('m'));
+        stCheck (list()[0]->isMuted (false) && last().startsWithIgnoreCase ("muted") && mc->getNameForRow (0).contains ("muted"), "M mutes, says so and shows in the list: \"" + last() + "\"");
+        press (stKey ('m'));
+        stCheck (! list()[0]->isMuted (false), "M again unmutes.");
+        press (stKey ('s'));
+        stCheck (list()[0]->isSolo (false) && mc->getNameForRow (0).contains ("soloed"), "S solos: \"" + last() + "\"");
+        press (stKey ('s'));
+        press (stKey (juce::KeyPress::upKey, shift));
+        stCheck (std::abs (list()[0]->getVolumePlugin()->getVolumeDb() - 1.0f) < 0.1f, "Shift-Up raises by 1 dB: \"" + last() + "\"");
+        CommandArgs vol; vol.set ("volume", -6.0);
+        run ("tracks.volume", vol);
+        stCheck (std::abs (list()[0]->getVolumePlugin()->getVolumeDb() + 6.0f) < 0.1f, "Track volume sets it: \"" + last() + "\"");
+        CommandArgs pan; pan.set ("pan", -30.0);
+        run ("tracks.pan", pan);
+        stCheck (last() == "30 left.", "Track pan says where: \"" + last() + "\"");
+        run ("tracks.report");
+        stCheck (last().contains ("Volume -6") && last().contains ("30 left"), "About this track: \"" + last() + "\"");
+        const int before = list().size();
+        run ("tracks.delete");
+        stCheck (list().size() == before - 1 && last().startsWith ("Deleted Piano"), "Delete track: \"" + last() + "\"");
+        run ("edit.undo");
+        stCheck (list().size() == before && list()[0]->getName() == "Piano", "Undo brings it back, name and all.");
+        run ("tracks.input");
+        stCheck (last().isNotEmpty(), "Track input answers even with no interface: \"" + last() + "\"");
+    }
+
+    stSay ("");
+    stSay ("Importing, editing and rendering audio");
+    {
+        auto run = [&] (const char* id, CommandArgs a = {}) { return core->commands().run (id, a); };
+        auto wav = root.getChildFile ("Four Second Tone.wav");
+        {
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::AudioFormatWriter> w (fmt.createWriterFor (new juce::FileOutputStream (wav), 48000.0, 1, 24, {}, 0));
+            juce::AudioBuffer<float> b (1, 192000);
+            for (int i = 0; i < b.getNumSamples(); ++i) b.setSample (0, i, 0.5f * (float) std::sin (i * 0.05));
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        }
+        auto& edit = core->session()->getEdit();
+        auto& transport = edit.getTransport();
+        transport.setPosition (tracktion::TimePosition());
+        core->selectedTrack = 0;
+        auto track = [&] { return contentTracks (core->session()->getEdit())[0]; };
+        const int clipsBefore = track()->getClips().size();
+        CommandArgs imp; imp.set ("file", wav.getFullPathName());
+        run ("file.import-audio", imp);
+        stCheck (track()->getClips().size() == clipsBefore + 1 && last().startsWith ("Imported"), "Import audio places the file: \"" + last() + "\"");
+        stCheck (core->session()->getFolder().getChildFile ("Audio").getChildFile (wav.getFileName()).existsAsFile(), "and the song keeps its own copy.");
+        CommandArgs notAudio; auto bad = root.getChildFile ("not audio.txt"); bad.replaceWithText ("hello"); notAudio.set ("file", bad.getFullPathName());
+        run ("file.import-audio", notAudio);
+        stCheck (last().startsWith ("Nothing was imported"), "A file that isn't audio is refused: \"" + last() + "\"");
+        run ("clips.report");
+        stCheck (last().startsWith ("Four Second Tone"), "About this clip: \"" + last() + "\"");
+
+        transport.setPosition (tracktion::TimePosition::fromSeconds (1.0));
+        press (stKey ('b'));
+        stCheck (track()->getClips().size() == clipsBefore + 2, "B splits at the playhead: \"" + last() + "\"");
+        run ("edit.undo");
+        stCheck (track()->getClips().size() == clipsBefore + 1, "Undo joins it back.");
+        run ("clips.trim-end");
+        stCheck (std::abs (track()->getClips()[clipsBefore]->getPosition().getLength().inSeconds() - 1.0) < 0.01, "Trim end leaves one second: \"" + last() + "\"");
+        run ("edit.undo");
+        transport.setPosition (tracktion::TimePosition::fromSeconds (1.0));
+        run ("clips.trim-start");
+        auto* trimmed = track()->getClips()[clipsBefore];
+        stCheck (std::abs (trimmed->getPosition().getStart().inSeconds() - 1.0) < 0.01 && std::abs (trimmed->getPosition().getOffset().inSeconds() - 1.0) < 0.01,
+                 "Trim start keeps the audio where it was: \"" + last() + "\"");
+        run ("edit.undo");
+        transport.setPosition (tracktion::TimePosition::fromSeconds (0.5));
+        CommandArgs by; by.set ("beats", 4.0);
+        run ("clips.move", by);
+        stCheck (std::abs (track()->getClips()[clipsBefore]->getPosition().getStart().inSeconds() - 2.0) < 0.01, "Move clip by four beats: \"" + last() + "\"");
+        transport.setPosition (tracktion::TimePosition());
+        run ("clips.next");
+        stCheck (std::abs (transport.getPosition().inSeconds() - 2.0) < 0.01, "Next clip goes to it: \"" + last() + "\"");
+
+        CommandArgs r; r.set ("name", "Mix One"); r.set ("format", "WAV 24-bit");
+        run ("file.render", r);
+        stCheck (last().startsWith ("Rendering"), "Render says it's started: \"" + last() + "\"");
+        for (int i = 0; i < 300 && core->isRendering(); ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+        stCheck (! core->isRendering() && core->lastRender.existsAsFile(), "and it finishes: \"" + last() + "\"");
+        if (core->lastRender.existsAsFile())
+        {
+            juce::WavAudioFormat fmt;
+            std::unique_ptr<juce::AudioFormatReader> rd (fmt.createReaderFor (core->lastRender.createInputStream().release(), true));
+            juce::Range<float> range;
+            if (rd != nullptr) { juce::Range<float> lv[2]; rd->readMaxLevels (0, rd->lengthInSamples, lv, 2); range = lv[0]; }
+            stCheck (rd != nullptr && rd->lengthInSamples / rd->sampleRate > 5.9 && rd->numChannels == 2 && rd->bitsPerSample == 24 && range.getEnd() > 0.2f,
+                     "The render has the song's length and sound: " + juce::String (rd != nullptr ? rd->lengthInSamples / rd->sampleRate : 0.0, 2) + " seconds, peak " + juce::String (range.getEnd(), 2) + ".");
+        }
+        run ("levels.report");
+        stCheck (last().contains ("No audio interface"), "What's the level answers with no interface: \"" + last() + "\"");
+        transport.setPosition (tracktion::TimePosition::fromSeconds (2.5));
+        press (stKey (juce::KeyPress::backspaceKey));
+        stCheck (track()->getClips().size() == clipsBefore, "Delete removes the clip: \"" + last() + "\"");
+    }
+
+    stSay ("");
+    stSay ("What a sighted person sees");
+    {
+        mc->setSize (1200, 800);
+        mc->resized();
+        int titled = 0, total = 0;
+        for (auto& b : mc->transportBar.buttons)
+        {
+            ++total;
+            if (b->getTitle().isNotEmpty() && b->getDescription().isNotEmpty() && b->getWantsKeyboardFocus() && ! b->getBounds().isEmpty()) ++titled;
+            else stSay ("  not ready: " + b->commandId() + " title \"" + b->getTitle() + "\" " + juce::String (b->getDescription().length()) + " " + b->getBounds().toString());
+        }
+        stCheck (total >= 10 && titled == total, "every transport button has a title, a description, a place on screen and takes the keyboard (" + juce::String (titled) + " of " + juce::String (total) + ").");
+        CommandButton* playButton = nullptr;
+        for (auto& b : mc->transportBar.buttons) if (b->commandId() == "transport.play-stop") playButton = b.get();
+        stCheck (playButton != nullptr && playButton->getButtonText() == "Play", "the Play button says Play while stopped.");
+        CommandButton* clickButton = nullptr;
+        for (auto& b : mc->transportBar.buttons) if (b->commandId() == "transport.metronome") clickButton = b.get();
+        if (clickButton != nullptr)
+        {
+            const bool was = clickButton->getToggleState();
+            clickButton->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+            clickButton->refresh();
+            stCheck (clickButton->getToggleState() != was && clickButton->getButtonText().endsWith (was ? "off" : "on"), "the Click button runs the command and says its state in words: \"" + clickButton->getButtonText() + "\"");
+            clickButton->triggerClick();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        }
+        stCheck (! mc->timeline.getWantsKeyboardFocus() && mc->timeline.getTitle() == "Timeline" && ! mc->timeline.getBounds().isEmpty(), "the timeline is on screen, titled, and out of the Tab order.");
+        stCheck (! mc->meterStrip.getWantsKeyboardFocus() && ! mc->meterStrip.getBounds().isEmpty(), "the meters are on screen and out of the Tab order.");
+        stCheck (mc->history.getWantsKeyboardFocus() && mc->history.getNumRows() > 0 && mc->history.getNameForRow (mc->history.getNumRows() - 1) == last(),
+                 "the message history holds what was said, newest last: \"" + mc->history.getNameForRow (mc->history.getNumRows() - 1) + "\"");
+        stCheck (mc->tracks.getRowHeight() == mc->timeline.laneHeight() && mc->timeline.laneTop() == mc->tracks.getY() - mc->timeline.getY(), "timeline lanes line up with the track list rows.");
+
+        auto snapDir = juce::SystemStats::getEnvironmentVariable ("EARFIRST_SNAPSHOTS", {});
+        for (auto theme : Theme::choices())
+        {
+            CommandArgs t; t.set ("colours", theme);
+            core->commands().run ("view.theme", t);
+            const auto resolved = Theme::make (core->theme);
+            stCheck (mc->look.theme.name == resolved.name && resolved.text.getPerceivedBrightness() != resolved.background.getPerceivedBrightness(),
+                     "Colours, " + theme + ": " + last());
+            // Text against its background must reach 4.5 to 1 (WCAG AA), in every theme.
+            auto contrast = [] (juce::Colour a, juce::Colour b)
+            {
+                auto lum = [] (juce::Colour c)
+                {
+                    auto ch = [] (float v) { return v <= 0.03928f ? v / 12.92f : std::pow ((v + 0.055f) / 1.055f, 2.4f); };
+                    return 0.2126f * ch (c.getFloatRed()) + 0.7152f * ch (c.getFloatGreen()) + 0.0722f * ch (c.getFloatBlue());
+                };
+                auto l1 = lum (a), l2 = lum (b);
+                return (std::max (l1, l2) + 0.05f) / (std::min (l1, l2) + 0.05f);
+            };
+            auto& th = mc->look.theme;
+            const float worst = std::min ({ contrast (th.text, th.background), contrast (th.text, th.panel), contrast (th.dim, th.panel),
+                                            contrast (th.selectionText, th.selection), contrast (th.clipText, th.clip), contrast (th.accentText, th.accent) });
+            stCheck (worst >= 4.5f, "  every text colour in " + th.name + " reaches 4.5 to 1 against its background (worst " + juce::String (worst, 1) + ").");
+            if (snapDir.isNotEmpty())
+            {
+                juce::File (snapDir).createDirectory();
+                auto img = mc->createComponentSnapshot (mc->getLocalBounds(), true, 1.0f);
+                juce::FileOutputStream fo (juce::File (snapDir).getChildFile ("window " + theme + ".png"));
+                fo.setPosition (0); fo.truncate();
+                juce::PNGImageFormat().writeImageToStream (img, fo);
+            }
+        }
+        core->commands().run ("view.beat-flash");
+        stCheck (core->beatFlash && last().startsWithIgnoreCase ("Flash on the beat on"), "Flash on the beat turns on: \"" + last() + "\"");
+        core->commands().run ("view.beat-flash");
+        stCheck (WelcomeComponent::welcomeText().contains ("Command-N") && WelcomeComponent::welcomeText().contains ("K to keep"), "the welcome says how to start and how to keep what you played.");
+    }
+
+    stSay ("");
     stSay ("Updates");
     core->commands().run ("app.check-for-updates");
     stCheck (last().contains ("version"), "Check for Updates says honestly where things stand: \"" + last() + "\"");

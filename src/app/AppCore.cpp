@@ -74,32 +74,8 @@ AppCore::AppCore (SpeechOutput& out, Options o)
         // it could say a word (it happened with a StudioLive 64S, 6 November
         // 2026). So try the saved one in the background first; if it doesn't
         // answer in a few seconds, start on the system's own audio and say why.
-        if (auto stuck = savedInterfaceThatWontAnswer(); stuck.isNotEmpty())
-            startupProblem = stuck + " isn't answering, so Ear First is using other audio for now. "
-                             "Turn the interface off and on, then choose it again with Record from.";
-        engine.getDeviceManager().initialise (1024, 1024);   // every input and output the interface has: routing can reach any of them
-        capture = std::make_unique<EngineCapture> (engine, captureRoot);
-        capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
-        capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
-        capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
-        capture->routesFor = [this] (const juce::String& iface) { return routesOn (iface); };
-        capture->onComputerInputsFound = [this] (const juce::String& iface, const juce::StringArray& found)
-        {
-            markComputerInputs (iface, found, false, true);
-        };
-        capture->refreshComputerInputs();
-        capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
-        {
-            if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
-            juce::MessageManager::callAsync ([this, flag, device, m] { if (*flag) handleMidiControl (device, m); });
-        };
-        attachIdleEdit();
-        capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
-        {
-            lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
-            setAsideNote = "The " + juce::String (secs < 90 ? juce::roundToInt (secs) : juce::roundToInt (secs / 60.0))
-                           + (secs < 90 ? " seconds" : " minutes") + " captured before the switch are kept. Keep recovered audio saves them.";
-        };
+        captureFolderRoot = captureRoot;
+        // The interface itself opens once the window is up: startAudio.
     }
 
     updates = Updater::createForThisPlatform ({});
@@ -119,7 +95,6 @@ AppCore::AppCore (SpeechOutput& out, Options o)
     registerCommands();
     setDefaultKeys();
     if (options.openAudioDevice) loadAppSettings();   // the self-test starts from defaults
-    if (capture) capture->refreshComputerInputs();     // the marks were just loaded
 
     juce::StringArray moved;
     if (auto f = keymapFile(); options.saveSettings && f.existsAsFile())
@@ -132,10 +107,41 @@ AppCore::AppCore (SpeechOutput& out, Options o)
     startTimerHz (20);
 }
 
+void AppCore::updateMeters (double now)
+{
+    if (capture == nullptr) return;
+    const auto update = [&] (std::vector<float>& level, std::vector<float>& held, std::vector<double>& heldAt, std::vector<float>& fresh,
+                             const juce::StringArray& names, const juce::StringArray& ignoreForClips, bool& clippedFlag)
+    {
+        level.resize (fresh.size(), 0.0f); held.resize (fresh.size(), 0.0f); heldAt.resize (fresh.size(), 0.0);
+        for (size_t i = 0; i < fresh.size(); ++i)
+        {
+            level[i] = std::max (fresh[i], level[i] * 0.82f);
+            if (fresh[i] >= held[i] || now - heldAt[i] > 3.0) { held[i] = fresh[i]; heldAt[i] = now; }
+            if (fresh[i] >= 0.9886f && (int) i < names.size() && ! ignoreForClips.contains (names[(int) i]))
+            {
+                clippedFlag = true;
+                auto& last = lastClipWarning[names[(int) i]];
+                if (clipWarnings && now - last > 5.0)
+                {
+                    last = now;
+                    say (names[(int) i] + " is clipping.", "Levels", "Clip.", Speech::Priority::urgent, "clip");
+                }
+            }
+        }
+    };
+    std::vector<float> freshIn, freshOut;
+    capture->takeLevels (freshIn, freshOut);
+    auto iface = capture->getInterfaceName();
+    update (meters.input, meters.inputHeld, meters.inputHeldAt, freshIn, capture->getInputNames(), computerInputsOn (iface), meters.inputClipped);
+    update (meters.output, meters.outputHeld, meters.outputHeldAt, freshOut, capture->getOutputNames(), {}, meters.outputClipped);
+}
+
 AppCore::~AppCore()
 {
     *alive = false;
     stopTimer();
+    renderJob.reset();
     if (capture != nullptr) capture->attachEdit (nullptr);
     capture.reset();
     song.reset();
@@ -222,61 +228,112 @@ juce::String firstThatAnswers (const juce::String& type, const juce::StringArray
 }
 } // namespace
 
-juce::String AppCore::savedInterfaceThatWontAnswer()
+AppCore::InterfaceCheck AppCore::checkSavedInterface (std::unique_ptr<juce::XmlElement> saved, juce::String prefIn, juce::String prefOut)
 {
-    // What would be opened: the saved choice, or the system's defaults.
+    // Any thread: it opens nothing the app keeps and touches nothing shared.
+    InterfaceCheck result;
     juce::AudioDeviceManager scratch;
     juce::OwnedArray<juce::AudioIODeviceType> types;
     scratch.createAudioDeviceTypes (types);
-    if (types.isEmpty()) return {};
+    if (types.isEmpty()) return result;
     auto* type = types[0];
     type->scanForDevices();
     auto outs = type->getDeviceNames (false), ins = type->getDeviceNames (true);
 
+    // What would be opened: the saved choice, or the system's defaults.
     juce::String in, out;
-    if (auto xml = engine.getPropertyStorage().getXmlProperty (SettingID::audio_device_setup))
+    if (saved != nullptr)
     {
-        in = xml->getStringAttribute ("audioInputDeviceName");
-        out = xml->getStringAttribute ("audioOutputDeviceName");
+        in = saved->getStringAttribute ("audioInputDeviceName");
+        out = saved->getStringAttribute ("audioOutputDeviceName");
     }
     // The interface you chose wins over whatever the last session fell back
     // to, so after a hiccup it comes back by itself.
-    {
-        auto app = juce::JSON::parse (appDataFolder().getChildFile ("App.json"));
-        auto prefIn = app.getProperty ("preferredInput", {}).toString(), prefOut = app.getProperty ("preferredOutput", {}).toString();
-        if (prefIn.isNotEmpty() && ins.contains (prefIn)) in = prefIn;
-        if (prefOut.isNotEmpty() && outs.contains (prefOut)) out = prefOut;
-    }
+    if (prefIn.isNotEmpty() && ins.contains (prefIn)) in = prefIn;
+    if (prefOut.isNotEmpty() && outs.contains (prefOut)) out = prefOut;
     if (in.isEmpty())  in  = ins[juce::jmax (0, type->getDefaultDeviceIndex (true))];
     if (out.isEmpty()) out = outs[juce::jmax (0, type->getDefaultDeviceIndex (false))];
 
     const bool outOk = out.isEmpty() || answers (type->getTypeName(), out, {}, 3.0);
     const bool inOk  = in.isEmpty() || in == out ? outOk : answers (type->getTypeName(), {}, in, 3.0);
+    result.setup = std::make_unique<juce::XmlElement> ("DEVICESETUP");
     if (outOk && inOk)
     {
         // Open what was asked for, even if the last session had fallen back.
-        auto xml = engine.getPropertyStorage().getXmlProperty (SettingID::audio_device_setup);
-        juce::XmlElement setup ("DEVICESETUP");
-        if (xml != nullptr) setup = *xml;
-        setup.setAttribute ("deviceType", type->getTypeName());
-        setup.setAttribute ("audioOutputDeviceName", out);
-        setup.setAttribute ("audioInputDeviceName", in);
-        engine.getPropertyStorage().setXmlProperty (SettingID::audio_device_setup, setup);
-        return {};
+        if (saved != nullptr) *result.setup = *saved;
+        result.setup->setAttribute ("deviceType", type->getTypeName());
+        result.setup->setAttribute ("audioOutputDeviceName", out);
+        result.setup->setAttribute ("audioInputDeviceName", in);
+        return result;
     }
 
     // Something that answers instead: the first output that does, and the
     // first input that does (or none, rather than freeze).
     juce::String newOut = outOk ? out : firstThatAnswers (type->getTypeName(), outs, false, out, 2.0);
     juce::String newIn  = inOk  ? in  : firstThatAnswers (type->getTypeName(), ins, true, in, 2.0);
-
-    juce::XmlElement setup ("DEVICESETUP");
-    setup.setAttribute ("deviceType", type->getTypeName());
-    setup.setAttribute ("audioOutputDeviceName", newOut);
-    setup.setAttribute ("audioInputDeviceName", newIn);
-    engine.getPropertyStorage().setXmlProperty (SettingID::audio_device_setup, setup);
-    return ! outOk ? out : in;
+    result.setup->setAttribute ("deviceType", type->getTypeName());
+    result.setup->setAttribute ("audioOutputDeviceName", newOut);
+    result.setup->setAttribute ("audioInputDeviceName", newIn);
+    result.stuck = ! outOk ? out : in;
+    return result;
 }
+
+void AppCore::openAudioNow()
+{
+    auto captureRoot = captureFolderRoot;
+        engine.getDeviceManager().initialise (1024, 1024);   // every input and output the interface has: routing can reach any of them
+        capture = std::make_unique<EngineCapture> (engine, captureRoot);
+        capture->describePlace = [this] (const Edit& e, TimePosition t) { return placeText (e, t); };
+        capture->onOutputLevel = [this] (float peak) { speaker.setOutputLevel (peak); };
+        capture->computerInputsFor = [this] (const juce::String& iface) { return computerInputsOn (iface); };
+        capture->routesFor = [this] (const juce::String& iface) { return routesOn (iface); };
+        capture->onComputerInputsFound = [this] (const juce::String& iface, const juce::StringArray& found)
+        {
+            markComputerInputs (iface, found, false, true);
+        };
+        capture->refreshComputerInputs();
+        capture->onMidi = [this, flag = alive] (const juce::String& device, const juce::MidiMessage& m)
+        {
+            if (m.isNoteOff() || m.isActiveSense() || m.isMidiClock()) return;
+            juce::MessageManager::callAsync ([this, flag, device, m] { if (*flag) handleMidiControl (device, m); });
+        };
+        attachIdleEdit();
+        capture->onCaptureSetAside = [this] (const juce::File& run, double secs)
+        {
+            lastOpenReport.leftoverCaptures.addIfNotAlreadyThere (run);
+            setAsideNote = "The " + juce::String (secs < 90 ? juce::roundToInt (secs) : juce::roundToInt (secs / 60.0))
+                           + (secs < 90 ? " seconds" : " minutes") + " captured before the switch are kept. Keep recovered audio saves them.";
+        };
+    capture->refreshComputerInputs();     // the marks were loaded with your settings
+}
+
+void AppCore::startAudio (std::function<void()> whenOpen)
+{
+    if (! options.openAudioDevice || capture != nullptr || audioStarting) return;
+    audioStarting = true;
+    // The slow part, asking the interface whether it answers, goes on a thread
+    // of its own, so the window is up and talking while it happens.
+    auto saved = engine.getPropertyStorage().getXmlProperty (SettingID::audio_device_setup);
+    auto app = juce::JSON::parse (appDataFolder().getChildFile ("App.json"));
+    auto prefIn = app.getProperty ("preferredInput", {}).toString(), prefOut = app.getProperty ("preferredOutput", {}).toString();
+    auto flag = alive;
+    std::thread ([this, flag, saved = std::shared_ptr<juce::XmlElement> (std::move (saved)), prefIn, prefOut, whenOpen]
+    {
+        auto check = std::make_shared<InterfaceCheck> (checkSavedInterface (saved != nullptr ? std::make_unique<juce::XmlElement> (*saved) : nullptr, prefIn, prefOut));
+        juce::MessageManager::callAsync ([this, flag, check, whenOpen]
+        {
+            if (! *flag) return;
+            if (check->setup != nullptr) engine.getPropertyStorage().setXmlProperty (SettingID::audio_device_setup, *check->setup);
+            if (check->stuck.isNotEmpty())
+                startupProblem = check->stuck + " isn't answering, so Ear First is using other audio for now. "
+                                 "Turn the interface off and on, then choose it again with Record from.";
+            openAudioNow();
+            audioStarting = false;
+            if (whenOpen) whenOpen();
+        });
+    }).detach();
+}
+
 
 juce::String AppCore::startupSentence() const
 {
@@ -323,6 +380,10 @@ void AppCore::saveAppSettings()
     if (! options.saveSettings) return;
     auto* o = new juce::DynamicObject();
     o->setProperty ("textScale", textScale);
+    o->setProperty ("theme", theme);
+    o->setProperty ("beatFlash", beatFlash);
+    o->setProperty ("welcomeSeen", welcomeSeen);
+    o->setProperty ("clipWarnings", clipWarnings);
     o->setProperty ("waitForGaps", speaker.settings.waitForGaps);
     o->setProperty ("announcedVersion", announcedVersion);
     o->setProperty ("speech", speechPrefs.toVar());
@@ -377,6 +438,10 @@ void AppCore::loadAppSettings()
     auto v = juce::JSON::parse (appDataFolder().getChildFile ("App.json"));
     if (! v.isObject()) return;
     textScale = juce::jlimit (0.75f, 3.0f, (float) (double) v.getProperty ("textScale", 1.0));
+    theme = v.getProperty ("theme", "Follow the system").toString();
+    beatFlash = (bool) v.getProperty ("beatFlash", false);
+    welcomeSeen = (bool) v.getProperty ("welcomeSeen", false);
+    clipWarnings = (bool) v.getProperty ("clipWarnings", true);
     speaker.settings.waitForGaps = (bool) v.getProperty ("waitForGaps", true);
     announcedVersion = v.getProperty ("announcedVersion", {}).toString();
     speechPrefs.fromVar (v.getProperty ("speech", {}));
@@ -667,6 +732,7 @@ void AppCore::timerCallback()
     const bool playing = song != nullptr && song->getEdit().getTransport().isPlaying();
     if (playing != wasPlaying) { speaker.setPlaying (playing); wasPlaying = playing; }
     speaker.tick (now);
+    updateMeters (now);
     if (learningCommand.isNotEmpty() && now - learningSince > 20.0)
     {
         learningCommand.clear();
@@ -1552,6 +1618,9 @@ void AppCore::registerCommands()
         add (c);
     }
 
+    registerSongCommands();
+    registerClipAndFileCommands();
+
     // Reports
     {
         Command c; c.id = "report.position"; c.name = "Where am I"; c.category = "Reports"; c.isReport = true;
@@ -1939,6 +2008,7 @@ void AppCore::registerCommands()
             textScale = juce::jmin (3.0f, textScale + 0.25f);
             saveAppSettings();
             if (onSongChanged) onSongChanged();
+            if (onViewChanged) onViewChanged();
             return CommandResult::done ("Text " + juce::String (juce::roundToInt (textScale * 100)) + " percent.");
         };
         add (c);
@@ -1949,7 +2019,60 @@ void AppCore::registerCommands()
             textScale = juce::jmax (0.75f, textScale - 0.25f);
             saveAppSettings();
             if (onSongChanged) onSongChanged();
+            if (onViewChanged) onViewChanged();
             return CommandResult::done ("Text " + juce::String (juce::roundToInt (textScale * 100)) + " percent.");
+        };
+        add (c);
+    }
+
+    {
+        Command c; c.id = "view.theme"; c.name = "Colours"; c.category = "View";
+        c.description = "Light, dark, high contrast, or whatever the system is set to.";
+        c.tags = { "theme", "dark mode", "high contrast", "appearance", "low vision" };
+        ArgSpec a; a.name = "colours"; a.type = ArgSpec::Type::choice;
+        a.choices = { "Follow the system", "Light", "Dark", "High contrast" };
+        a.defaultValue = "Follow the system";
+        a.currentValue = [this]() -> juce::var { return theme; };
+        c.args = { a };
+        c.askForSettings = true;
+        c.run = [this] (const CommandArgs& args)
+        {
+            theme = args["colours"].toString();
+            saveAppSettings();
+            if (onViewChanged) onViewChanged();
+            return CommandResult::done ("Colours: " + theme + ".");
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "view.beat-flash"; c.name = "Flash on the beat"; c.category = "View";
+        c.description = "Lights the edge of the window on every beat while the song plays, for anyone who can't hear the click.";
+        c.tags = { "visual click", "metronome", "deaf", "hard of hearing", "light" };
+        c.toggleState = [this] { return std::optional<bool> (beatFlash); };
+        c.run = [this] (const CommandArgs&) { beatFlash = ! beatFlash; saveAppSettings(); if (onViewChanged) onViewChanged(); return CommandResult::done(); };
+        add (c);
+    }
+    {
+        Command c; c.id = "view.messages"; c.name = "Go to messages"; c.category = "View";
+        c.description = "Moves to the list of everything Ear First has said, newest at the bottom.";
+        c.tags = { "history", "log", "missed", "what did it say" };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (! onShowMessages) return CommandResult::failed ("There's no window to show them in.");
+            onShowMessages();
+            return CommandResult::done();
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "help.welcome"; c.name = "Welcome"; c.category = "Help";
+        c.description = "Shows the welcome again: what Ear First is and how to start.";
+        c.tags = { "start", "introduction", "getting started", "tour" };
+        c.run = [this] (const CommandArgs&)
+        {
+            if (! onShowWelcome) return CommandResult::failed ("There's no window to show it in.");
+            onShowWelcome();
+            return CommandResult::done();
         };
         add (c);
     }
@@ -2095,6 +2218,46 @@ void AppCore::setDefaultKeys()
         k ("Shift+K", "capture.keep", "main", keep2min),
         k ("Primary+Shift+C", "capture.status"),
         k ("Primary+T", "tracks.add"),
+        k ("Primary+Shift+O", "routing.send"),
+        k ("Shift+O", "routing.report", "main"),
+        k ("Primary+Shift+Backspace", "routing.remove"),
+        k ("Primary+Shift+H", "tracks.output"),
+        k ("Primary+Shift+B", "view.beat-flash"),
+        k ("Primary+Shift+G", "view.messages"),
+        k ("Primary+I", "file.import-audio"),
+        k ("Primary+Shift+E", "file.render"),
+        k ("V", "levels.report", "main"),
+        k ("N", "clips.next", "main"),
+        k ("P", "clips.previous", "main"),
+        k ("B", "clips.split", "main"),
+        k ("Primary+[", "clips.trim-start"),
+        k ("Primary+]", "clips.trim-end"),
+        k ("Backspace", "clips.delete", "main"),
+        k ("Delete", "clips.delete", "main"),
+        k ("Shift+I", "clips.report", "main"),
+        k ("Right", "transport.next-bar", "main"),
+        k ("Left", "transport.previous-bar", "main"),
+        k ("Shift+Right", "transport.next-beat", "main"),
+        k ("Shift+Left", "transport.previous-beat", "main"),
+        k ("Period", "transport.fast-forward", "main"),
+        k ("Comma", "transport.rewind", "main"),
+        k ("End", "transport.go-to-end", "main"),
+        k ("Primary+G", "transport.go-to-bar"),
+        k ("Shift+M", "markers.add", "main"),
+        k ("]", "markers.next", "main"),
+        k ("[", "markers.previous", "main"),
+        k ("Primary+Shift+M", "markers.list"),
+        k ("M", "tracks.mute", "main"),
+        k ("S", "tracks.solo", "main"),
+        k ("I", "tracks.report", "main"),
+        k ("Primary+R", "tracks.rename"),
+        k ("Primary+Backspace", "tracks.delete"),
+        k ("Shift+Up", "tracks.volume-up", "main"),
+        k ("Shift+Down", "tracks.volume-down", "main"),
+        k ("Primary+Left", "tracks.pan-left", "main"),
+        k ("Primary+Right", "tracks.pan-right", "main"),
+        k ("Primary+Shift+Up", "tracks.move-up"),
+        k ("Primary+Shift+Down", "tracks.move-down"),
         // Up and Down in the track list are the list's own: it moves and the
         // screen reader reads each row. tracks.next/previous stay as
         // commands for control surfaces and the palette.
