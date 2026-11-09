@@ -682,8 +682,9 @@ public:
     {
         return juce::String ("Ear First works by ear and by eye. Every action is a command: it has a key, it's in a menu, and Command-Shift-P finds it by name.\n\n")
              + "It's already listening. Every input on your interface is captured from the moment Ear First opens, so you never have to press record. "
-               "When you've played something you want, press K to keep the last 30 seconds, or Shift-K for the last two minutes.\n\n"
-             + "To start: Command-N makes a new song, Command-O opens one. Space plays and stops. Left and Right move by bar, Shift with them by beat.\n\n"
+               "When you've played something you want, press K (or R) to keep the last 30 seconds, or Shift-K for the last two minutes.\n\n"
+             + "To start: Command-N makes a new song, Command-O opens one. Space plays and stops. Page Up and Page Down move by bar, Left and Right by beat, "
+               "and M drops a marker. The keys follow REAPER with OSARA wherever Ear First does the same thing.\n\n"
              + "Lost? Command-Slash turns on key help: press any key to hear what it does. Command-Shift-R says the last message again.\n\n"
              + "This window comes back from the Help menu, under Welcome.";
     }

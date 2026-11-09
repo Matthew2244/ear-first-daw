@@ -308,15 +308,21 @@ int runSelfTest()
         auto& tempo = core->session()->getEdit().tempoSequence;
         auto barNow = [&] { return tempo.toBarsAndBeats (transport.getPosition()).bars + 1; };
         transport.setPosition (tracktion::TimePosition());
+        stCheck (! mc->tracks.keyPressed (stKey (juce::KeyPress::pageDownKey)) && ! mc->tracks.keyPressed (stKey (juce::KeyPress::homeKey))
+                 && ! mc->tracks.keyPressed (stKey (juce::KeyPress::backspaceKey)), "the track list passes Page Down, Home and Delete on to the keymap.");
+        press (stKey (juce::KeyPress::pageDownKey));
+        stCheck (barNow() == 2 && last().isNotEmpty(), "Page Down goes to bar 2 and says so, as in REAPER: \"" + last() + "\"");
         press (stKey (juce::KeyPress::rightKey));
-        stCheck (barNow() == 2 && last().isNotEmpty(), "Right goes to bar 2 and says so: \"" + last() + "\"");
-        press (stKey (juce::KeyPress::rightKey, shift));
-        stCheck (tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 1, "Shift-Right steps one beat.");
-        press (stKey (juce::KeyPress::leftKey));
-        stCheck (barNow() == 2 && tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 0, "Left from inside a bar goes to that bar's start.");
-        press (stKey (juce::KeyPress::leftKey));
-        press (stKey (juce::KeyPress::leftKey));
-        stCheck (barNow() == 1 && transport.getPosition().inSeconds() == 0.0, "Left stops at the start of the song.");
+        stCheck (tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 1, "Right steps one beat.");
+        press (stKey (juce::KeyPress::homeKey, juce::ModifierKeys::altModifier));
+        stCheck (barNow() == 2 && tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 0, "Option-Home goes to the start of this bar.");
+        press (stKey (juce::KeyPress::pageUpKey));
+        press (stKey (juce::KeyPress::pageUpKey));
+        stCheck (barNow() == 1 && transport.getPosition().inSeconds() == 0.0, "Page Up stops at the start of the song.");
+        press (stKey (juce::KeyPress::pageDownKey, cmd));
+        stCheck (tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 1, "Command-Page Down steps one beat.");
+        press (stKey (juce::KeyPress::homeKey));
+        stCheck (transport.getPosition().inSeconds() == 0.0, "Home goes to the start.");
         CommandArgs where; where.set ("bar", 9); where.set ("beat", 3.0);
         run ("transport.go-to-bar", where);
         stCheck (barNow() == 9 && tempo.toBarsAndBeats (transport.getPosition()).getWholeBeats() == 2, "Go to bar lands on bar 9, beat 3: \"" + last() + "\"");
@@ -325,12 +331,12 @@ int runSelfTest()
 
         stSay ("Markers");
         run ("markers.next");
-        stCheck (last().contains ("no markers") || last().contains ("Shift-M"), "with no markers, Next marker says so: \"" + last() + "\"");
+        stCheck (last().contains ("no markers") || last().contains ("M adds"), "with no markers, Next marker says so: \"" + last() + "\"");
         CommandArgs verse; verse.set ("name", "Verse");
         where.set ("bar", 5); where.set ("beat", 1.0); run ("transport.go-to-bar", where); run ("markers.add", verse);
-        where.set ("bar", 2); run ("transport.go-to-bar", where); run ("markers.add");
+        where.set ("bar", 2); run ("transport.go-to-bar", where); press (stKey ('m'));
         transport.setPosition (tracktion::TimePosition());
-        run ("markers.next");
+        press (stKey ('\''));
         stCheck (barNow() == 2 && last().startsWith ("Marker"), "Next marker finds the nearest one first: \"" + last() + "\"");
         run ("markers.next");
         stCheck (barNow() == 5 && last().startsWith ("Verse"), "then the one after: \"" + last() + "\"");
@@ -342,6 +348,22 @@ int runSelfTest()
         stCheck (last() == "Deleted Verse." && core->session()->getEdit().getMarkerManager().getMarkers().size() == 1, "Delete marker removes the one here.");
         run ("edit.undo");
         stCheck (core->session()->getEdit().getMarkerManager().getMarkers().size() == 2, "and Undo brings it back.");
+        transport.setPosition (tracktion::TimePosition());
+        press (stKey ('2'));
+        stCheck (barNow() == 2, "2 goes to marker 2, as in REAPER: \"" + last() + "\"");
+        where.set ("bar", 7); run ("transport.go-to-bar", where);
+        press (stKey ('2', cmd));
+        transport.setPosition (tracktion::TimePosition());
+        press (stKey ('2'));
+        stCheck (barNow() == 7, "Command-2 moves marker 2 to the playhead: \"" + last() + "\"");
+        press (stKey (';'));
+        stCheck (last().contains ("Verse") || barNow() < 7, "Semicolon goes to the previous marker: \"" + last() + "\"");
+        where.set ("bar", 3); run ("transport.go-to-bar", where); press (stKey ('['));
+        where.set ("bar", 5); run ("transport.go-to-bar", where); press (stKey (']'));
+        auto loop = transport.getLoopRange();
+        stCheck (std::abs (loop.getStart().inSeconds() - tempo.toTime (tracktion::tempo::BarsAndBeats { 2, {} }).inSeconds()) < 0.001
+                 && std::abs (loop.getEnd().inSeconds() - tempo.toTime (tracktion::tempo::BarsAndBeats { 4, {} }).inSeconds()) < 0.001,
+                 "[ and ] set the loop from bar 3 to bar 5: \"" + last() + "\"");
     }
 
     stSay ("");
@@ -360,15 +382,17 @@ int runSelfTest()
         stCheck (list()[0]->getName() == "Piano" && core->selectedTrack == 0, "Move track up, back to the top.");
         run ("tracks.move-up");
         stCheck (last().contains ("already"), "and it says when it can't go further.");
-        press (stKey ('m'));
-        stCheck (list()[0]->isMuted (false) && last().startsWithIgnoreCase ("muted") && mc->getNameForRow (0).contains ("muted"), "M mutes, says so and shows in the list: \"" + last() + "\"");
-        press (stKey ('m'));
-        stCheck (! list()[0]->isMuted (false), "M again unmutes.");
-        press (stKey ('s'));
-        stCheck (list()[0]->isSolo (false) && mc->getNameForRow (0).contains ("soloed"), "S solos: \"" + last() + "\"");
-        press (stKey ('s'));
-        press (stKey (juce::KeyPress::upKey, shift));
-        stCheck (std::abs (list()[0]->getVolumePlugin()->getVolumeDb() - 1.0f) < 0.1f, "Shift-Up raises by 1 dB: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::F5Key));
+        stCheck (list()[0]->isMuted (false) && last().startsWithIgnoreCase ("muted") && mc->getNameForRow (0).contains ("muted"), "F5 mutes, as in REAPER, says so and shows in the list: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::F5Key, juce::ModifierKeys::altModifier | shift));
+        stCheck (last().startsWith ("1 muted: Piano"), "Option-Shift-F5 says which tracks are muted: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::F5Key, juce::ModifierKeys::altModifier));
+        stCheck (! list()[0]->isMuted (false), "Option-F5 unmutes all: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::F6Key));
+        stCheck (list()[0]->isSolo (false) && mc->getNameForRow (0).contains ("soloed"), "F6 solos: \"" + last() + "\"");
+        press (stKey (juce::KeyPress::F6Key));
+        press (stKey (juce::KeyPress::upKey, juce::ModifierKeys::altModifier));
+        stCheck (std::abs (list()[0]->getVolumePlugin()->getVolumeDb() - 1.0f) < 0.1f, "Option-Up raises by 1 dB: \"" + last() + "\"");
         CommandArgs vol; vol.set ("volume", -6.0);
         run ("tracks.volume", vol);
         stCheck (std::abs (list()[0]->getVolumePlugin()->getVolumeDb() + 6.0f) < 0.1f, "Track volume sets it: \"" + last() + "\"");
@@ -415,8 +439,8 @@ int runSelfTest()
         stCheck (last().startsWith ("Four Second Tone"), "About this clip: \"" + last() + "\"");
 
         transport.setPosition (tracktion::TimePosition::fromSeconds (1.0));
-        press (stKey ('b'));
-        stCheck (track()->getClips().size() == clipsBefore + 2, "B splits at the playhead: \"" + last() + "\"");
+        press (stKey ('s'));
+        stCheck (track()->getClips().size() == clipsBefore + 2, "S splits at the playhead, as in REAPER: \"" + last() + "\"");
         run ("edit.undo");
         stCheck (track()->getClips().size() == clipsBefore + 1, "Undo joins it back.");
         run ("clips.trim-end");
@@ -526,7 +550,7 @@ int runSelfTest()
         core->commands().run ("view.beat-flash");
         stCheck (core->beatFlash && last().startsWithIgnoreCase ("Flash on the beat on"), "Flash on the beat turns on: \"" + last() + "\"");
         core->commands().run ("view.beat-flash");
-        stCheck (WelcomeComponent::welcomeText().contains ("Command-N") && WelcomeComponent::welcomeText().contains ("K to keep"), "the welcome says how to start and how to keep what you played.");
+        stCheck (WelcomeComponent::welcomeText().contains ("Command-N") && WelcomeComponent::welcomeText().contains ("to keep the last 30 seconds"), "the welcome says how to start and how to keep what you played.");
     }
 
     stSay ("");

@@ -143,6 +143,49 @@ void AppCore::registerSongCommands()
         add (c);
     }
 
+    {
+        Command c; c.id = "transport.bar-start"; c.name = "Start of this bar"; c.category = "Transport";
+        c.description = "Moves the playhead back to the start of the bar it's in.";
+        c.tags = { "move", "navigate", "measure" };
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs&)
+        {
+            auto& tempo = song->getEdit().tempoSequence;
+            tempo::BarsAndBeats to; to.bars = tempo.toBarsAndBeats (song->getEdit().getTransport().getPosition()).bars;
+            return arrive (tempo.toTime (to));
+        };
+        add (c);
+    }
+    auto setLoopEdge = [this] (bool start)
+    {
+        auto& t = song->getEdit().getTransport();
+        const auto here = t.getPosition();
+        auto range = t.getLoopRange();
+        if (start) range = { here, range.getEnd() > here ? range.getEnd() : here + TimeDuration::fromSeconds (std::max (1.0, range.getLength().inSeconds())) };
+        else       range = { range.getStart() < here ? range.getStart() : TimePosition(), here };
+        if (range.getLength() <= TimeDuration()) return CommandResult::failed ("The loop's end has to come after its start.");
+        t.setLoopRange (range);
+        auto& e = song->getEdit();
+        return CommandResult::done ("Loop from " + placeText (e, range.getStart()) + " to " + placeText (e, range.getEnd()) + ".",
+                                    start ? "Loop start." : "Loop end.");
+    };
+    {
+        Command c; c.id = "transport.loop-start"; c.name = "Loop starts here"; c.category = "Transport";
+        c.description = "Sets where the loop starts to the playhead.";
+        c.tags = { "cycle", "repeat", "time selection", "in point" };
+        c.available = needSong;
+        c.run = [setLoopEdge] (const CommandArgs&) { return setLoopEdge (true); };
+        add (c);
+    }
+    {
+        Command c; c.id = "transport.loop-end"; c.name = "Loop ends here"; c.category = "Transport";
+        c.description = "Sets where the loop ends to the playhead.";
+        c.tags = { "cycle", "repeat", "time selection", "out point" };
+        c.available = needSong;
+        c.run = [setLoopEdge] (const CommandArgs&) { return setLoopEdge (false); };
+        add (c);
+    }
+
     //==========================================================================
     // Markers
     auto markerAtOrBefore = [this] () -> MarkerClip*
@@ -159,7 +202,7 @@ void AppCore::registerSongCommands()
     auto needMarker = [this, needSong]
     {
         if (auto ok = needSong(); ! ok.enabled) return ok;
-        return song->getEdit().getMarkerManager().getMarkers().isEmpty() ? Availability::no ("There are no markers. Shift-M adds one here.") : Availability::yes();
+        return song->getEdit().getMarkerManager().getMarkers().isEmpty() ? Availability::no ("There are no markers. M adds one here.") : Availability::yes();
     };
     {
         Command c; c.id = "markers.add"; c.name = "Add marker"; c.category = "Markers";
@@ -173,10 +216,11 @@ void AppCore::registerSongCommands()
             auto& e = song->getEdit();
             auto& mm = e.getMarkerManager();
             const auto at = e.getTransport().getPosition();
-            auto m = mm.createMarker (mm.getNextUniqueID(), at, TimeDuration::fromSeconds (1.0), nullptr);
+            const int number = mm.getNextUniqueID();
+            auto m = mm.createMarker (number, at, TimeDuration::fromSeconds (1.0), nullptr);
             if (m == nullptr) return CommandResult::failed ("The marker couldn't be added.");
             const auto typed = args["name"].toString().trim();
-            m->setName (typed.isNotEmpty() ? typed : "Marker " + juce::String (mm.getMarkers().size()));
+            m->setName (typed.isNotEmpty() ? typed : "Marker " + juce::String (number));
             songChanged();
             return CommandResult::done (m->getName() + " at " + placeText (e, at) + ".");
         };
@@ -214,6 +258,55 @@ void AppCore::registerSongCommands()
         c.description = "Moves the playhead to the previous marker and says its name.";
         c.available = needMarker;
         c.run = [toMarker] (const CommandArgs&) { return toMarker (-1); };
+        add (c);
+    }
+    {
+        Command c; c.id = "markers.go-to"; c.name = "Go to marker number"; c.category = "Markers";
+        c.description = "Moves the playhead to the marker with that number.";
+        c.tags = { "jump", "locate" };
+        ArgSpec a; a.name = "number"; a.type = ArgSpec::Type::integer; a.defaultValue = 1; a.minimum = 1;
+        c.args = { a };
+        c.askForSettings = true;
+        c.available = needSong;
+        c.run = [this, arrive] (const CommandArgs& args)
+        {
+            const int n = (int) args["number"];
+            auto* m = song->getEdit().getMarkerManager().getMarkerByID (n);
+            if (m == nullptr) return CommandResult::failed ("There's no marker " + juce::String (n) + ".");
+            const auto name = m->getName();
+            auto moved = arrive (m->getPosition().getStart());
+            moved.spoken = name + ". " + moved.spoken;
+            moved.brief = name + ".";
+            return moved;
+        };
+        add (c);
+    }
+    {
+        Command c; c.id = "markers.set"; c.name = "Put marker number here"; c.category = "Markers";
+        c.description = "Puts the marker with that number at the playhead, moving it if it's already somewhere else.";
+        c.tags = { "add", "move", "drop" };
+        ArgSpec a; a.name = "number"; a.type = ArgSpec::Type::integer; a.defaultValue = 1; a.minimum = 1;
+        c.args = { a };
+        c.askForSettings = true; c.undoable = true;
+        c.available = needSong;
+        c.run = [this, songChanged] (const CommandArgs& args)
+        {
+            auto& e = song->getEdit();
+            const int n = (int) args["number"];
+            const auto at = e.getTransport().getPosition();
+            auto* m = e.getMarkerManager().getMarkerByID (n);
+            const bool moved = m != nullptr;
+            if (m == nullptr)
+            {
+                auto made = e.getMarkerManager().createMarker (n, at, TimeDuration::fromSeconds (1.0), nullptr);
+                if (made == nullptr) return CommandResult::failed ("The marker couldn't be added.");
+                made->setName ("Marker " + juce::String (n));
+                m = dynamic_cast<MarkerClip*> (made.get());
+            }
+            else m->setStart (at, false, true);
+            songChanged();
+            return CommandResult::done (m->getName() + (moved ? " moved to " : " at ") + placeText (e, at) + ".");
+        };
         add (c);
     }
     {
@@ -281,6 +374,32 @@ void AppCore::registerSongCommands()
         c.tags = { "status", "info", "level" };
         c.available = needTrack;
         c.run = [this] (const CommandArgs&) { return CommandResult::done (trackSentence (*selectedAudioTrack())); };
+        add (c);
+    }
+    struct AllTracks { const char* id; const char* name; const char* description; bool mute; bool report; };
+    for (auto& a : std::vector<AllTracks> {
+             { "tracks.unmute-all",     "Unmute all tracks",     "Takes the mute off every track.",           true,  false },
+             { "tracks.unsolo-all",     "Unsolo all tracks",     "Takes the solo off every track.",           false, false },
+             { "tracks.report-muted",   "Which tracks are muted",  "Says every muted track. Changes nothing.",  true,  true },
+             { "tracks.report-soloed",  "Which tracks are soloed", "Says every soloed track. Changes nothing.", false, true } })
+    {
+        Command c; c.id = a.id; c.name = a.name; c.category = "Tracks"; c.description = a.description;
+        c.isReport = a.report; c.undoable = ! a.report;
+        c.available = needSong;
+        c.run = [this, songChanged, mute = a.mute, report = a.report] (const CommandArgs&)
+        {
+            juce::StringArray names;
+            for (auto* t : contentTracks (song->getEdit()))
+                if (mute ? t->isMuted (false) : t->isSolo (false))
+                {
+                    names.add (t->getName());
+                    if (! report) { if (mute) t->setMute (false); else t->setSolo (false); }
+                }
+            const juce::String word = mute ? "muted" : "soloed";
+            if (report) return CommandResult::done (names.isEmpty() ? "No tracks are " + word + "." : juce::String (names.size()) + " " + word + ": " + names.joinIntoString (", ") + ".");
+            songChanged();
+            return CommandResult::done (names.isEmpty() ? "Nothing was " + word + "." : (mute ? "Unmuted " : "Unsoloed ") + names.joinIntoString (", ") + ".");
+        };
         add (c);
     }
     {

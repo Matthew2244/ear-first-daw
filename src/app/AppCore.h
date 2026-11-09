@@ -120,7 +120,7 @@ public:
     void saveAppSettings();
     void loadAppSettings();
 
-    static constexpr int keymapDefaultsVersion = 2;
+    static constexpr int keymapDefaultsVersion = 3;
 
 private:
     void timerCallback() override;

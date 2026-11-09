@@ -483,6 +483,21 @@ private:
 };
 
 //==============================================================================
+// The track list keeps only plain Up and Down for itself. Home, End, Page Up,
+// Page Down, Delete and the rest go on to the keymap, so they move around the
+// song and edit it, as in REAPER, instead of jumping around the list.
+class TrackList : public juce::ListBox
+{
+public:
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        const bool plain = ! k.getModifiers().isAnyModifierKeyDown();
+        if (plain && (k.isKeyCode (juce::KeyPress::upKey) || k.isKeyCode (juce::KeyPress::downKey)))
+            return juce::ListBox::keyPressed (k);
+        return false;
+    }
+};
+
 class MainComponent : public juce::Component, public juce::MenuBarModel, public juce::ListBoxModel, private juce::Timer,
                       private juce::DarkModeSettingListener
 {
@@ -745,7 +760,7 @@ public:
     Palette* palette = nullptr;          // for the self-test
     juce::Component::SafePointer<juce::DialogWindow> paletteWindow;
     KeyRouter router;
-    juce::ListBox tracks;
+    TrackList tracks;
     juce::Label status, songLine, transportInfo, captureInfo;
 
     juce::Array<tracktion::AudioTrack*> tracksList() const
